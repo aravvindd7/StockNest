@@ -1,0 +1,10 @@
+# StockNest ML Service — Phase 4 (XGBoost forecasting engine)
+# Kept minimal and pinned to major versions actually tested in this build.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pymongo>=4.6
+pandas>=2.2
+numpy>=1.26
+xgboost>=2.0
+openpyxl>=3.1
+python-dotenv>=1.0

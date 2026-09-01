@@ -1,0 +1,1022 @@
+[
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 1,
+    "n": 168,
+    "xgboost": {
+      "n": 168,
+      "wmape": 8.85,
+      "mae": 22.14,
+      "rmse": 34.66
+    },
+    "wma": {
+      "n": 168,
+      "wmape": 16.09,
+      "mae": 40.26,
+      "rmse": 92.24
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 2,
+    "n": 161,
+    "xgboost": {
+      "n": 161,
+      "wmape": 9.99,
+      "mae": 25.13,
+      "rmse": 42.05
+    },
+    "wma": {
+      "n": 161,
+      "wmape": 21.47,
+      "mae": 53.99,
+      "rmse": 118.27
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 3,
+    "n": 154,
+    "xgboost": {
+      "n": 154,
+      "wmape": 11.11,
+      "mae": 28.15,
+      "rmse": 42.42
+    },
+    "wma": {
+      "n": 154,
+      "wmape": 26.71,
+      "mae": 67.68,
+      "rmse": 135.96
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 4,
+    "n": 147,
+    "xgboost": {
+      "n": 147,
+      "wmape": 11.52,
+      "mae": 29.33,
+      "rmse": 46.85
+    },
+    "wma": {
+      "n": 147,
+      "wmape": 27.24,
+      "mae": 69.32,
+      "rmse": 136.53
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 5,
+    "n": 140,
+    "xgboost": {
+      "n": 140,
+      "wmape": 12.08,
+      "mae": 30.62,
+      "rmse": 50.6
+    },
+    "wma": {
+      "n": 140,
+      "wmape": 26.78,
+      "mae": 67.89,
+      "rmse": 135.41
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 6,
+    "n": 133,
+    "xgboost": {
+      "n": 133,
+      "wmape": 11.66,
+      "mae": 29.34,
+      "rmse": 48.5
+    },
+    "wma": {
+      "n": 133,
+      "wmape": 25.92,
+      "mae": 65.23,
+      "rmse": 132.77
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 7,
+    "n": 126,
+    "xgboost": {
+      "n": 126,
+      "wmape": 10.8,
+      "mae": 26.97,
+      "rmse": 39.99
+    },
+    "wma": {
+      "n": 126,
+      "wmape": 24.88,
+      "mae": 62.12,
+      "rmse": 126.88
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 8,
+    "n": 119,
+    "xgboost": {
+      "n": 119,
+      "wmape": 11.14,
+      "mae": 27.73,
+      "rmse": 41.61
+    },
+    "wma": {
+      "n": 119,
+      "wmape": 23.21,
+      "mae": 57.76,
+      "rmse": 118.93
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 9,
+    "n": 112,
+    "xgboost": {
+      "n": 112,
+      "wmape": 11.4,
+      "mae": 28.24,
+      "rmse": 43.16
+    },
+    "wma": {
+      "n": 112,
+      "wmape": 21.44,
+      "mae": 53.08,
+      "rmse": 108.68
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 10,
+    "n": 105,
+    "xgboost": {
+      "n": 105,
+      "wmape": 10.85,
+      "mae": 26.75,
+      "rmse": 38.44
+    },
+    "wma": {
+      "n": 105,
+      "wmape": 15.2,
+      "mae": 37.46,
+      "rmse": 78.52
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 11,
+    "n": 98,
+    "xgboost": {
+      "n": 98,
+      "wmape": 10.76,
+      "mae": 26.74,
+      "rmse": 40.15
+    },
+    "wma": {
+      "n": 98,
+      "wmape": 12.47,
+      "mae": 30.97,
+      "rmse": 53.24
+    }
+  },
+  {
+    "Plant": "Bengaluru Plant",
+    "horizon": 12,
+    "n": 91,
+    "xgboost": {
+      "n": 91,
+      "wmape": 12.61,
+      "mae": 31.58,
+      "rmse": 44.06
+    },
+    "wma": {
+      "n": 91,
+      "wmape": 11.97,
+      "mae": 29.98,
+      "rmse": 47.44
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 1,
+    "n": 216,
+    "xgboost": {
+      "n": 216,
+      "wmape": 8.57,
+      "mae": 11.87,
+      "rmse": 22.15
+    },
+    "wma": {
+      "n": 216,
+      "wmape": 16.54,
+      "mae": 22.9,
+      "rmse": 56.24
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 2,
+    "n": 207,
+    "xgboost": {
+      "n": 207,
+      "wmape": 10.67,
+      "mae": 14.84,
+      "rmse": 27.89
+    },
+    "wma": {
+      "n": 207,
+      "wmape": 22.46,
+      "mae": 31.24,
+      "rmse": 72.62
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 3,
+    "n": 198,
+    "xgboost": {
+      "n": 198,
+      "wmape": 10.62,
+      "mae": 14.82,
+      "rmse": 27.59
+    },
+    "wma": {
+      "n": 198,
+      "wmape": 26.7,
+      "mae": 37.26,
+      "rmse": 81.32
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 4,
+    "n": 189,
+    "xgboost": {
+      "n": 189,
+      "wmape": 11.45,
+      "mae": 16.01,
+      "rmse": 30.06
+    },
+    "wma": {
+      "n": 189,
+      "wmape": 25.34,
+      "mae": 35.45,
+      "rmse": 77.9
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 5,
+    "n": 180,
+    "xgboost": {
+      "n": 180,
+      "wmape": 11.93,
+      "mae": 16.83,
+      "rmse": 33.52
+    },
+    "wma": {
+      "n": 180,
+      "wmape": 24.86,
+      "mae": 35.07,
+      "rmse": 76.92
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 6,
+    "n": 171,
+    "xgboost": {
+      "n": 171,
+      "wmape": 12.76,
+      "mae": 18.16,
+      "rmse": 33.36
+    },
+    "wma": {
+      "n": 171,
+      "wmape": 24.51,
+      "mae": 34.88,
+      "rmse": 77.93
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 7,
+    "n": 162,
+    "xgboost": {
+      "n": 162,
+      "wmape": 11.94,
+      "mae": 17.16,
+      "rmse": 30.12
+    },
+    "wma": {
+      "n": 162,
+      "wmape": 25.66,
+      "mae": 36.9,
+      "rmse": 79.95
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 8,
+    "n": 153,
+    "xgboost": {
+      "n": 153,
+      "wmape": 11.91,
+      "mae": 16.92,
+      "rmse": 29.59
+    },
+    "wma": {
+      "n": 153,
+      "wmape": 24.86,
+      "mae": 35.3,
+      "rmse": 75.34
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 9,
+    "n": 144,
+    "xgboost": {
+      "n": 144,
+      "wmape": 11.1,
+      "mae": 15.62,
+      "rmse": 24.49
+    },
+    "wma": {
+      "n": 144,
+      "wmape": 23.06,
+      "mae": 32.45,
+      "rmse": 69.11
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 10,
+    "n": 135,
+    "xgboost": {
+      "n": 135,
+      "wmape": 10.17,
+      "mae": 14.19,
+      "rmse": 20.29
+    },
+    "wma": {
+      "n": 135,
+      "wmape": 17.0,
+      "mae": 23.72,
+      "rmse": 53.23
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 11,
+    "n": 126,
+    "xgboost": {
+      "n": 126,
+      "wmape": 9.99,
+      "mae": 14.04,
+      "rmse": 20.47
+    },
+    "wma": {
+      "n": 126,
+      "wmape": 11.6,
+      "mae": 16.3,
+      "rmse": 35.21
+    }
+  },
+  {
+    "Plant": "Chennai Plant",
+    "horizon": 12,
+    "n": 117,
+    "xgboost": {
+      "n": 117,
+      "wmape": 9.93,
+      "mae": 14.04,
+      "rmse": 19.17
+    },
+    "wma": {
+      "n": 117,
+      "wmape": 9.92,
+      "mae": 14.03,
+      "rmse": 26.41
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 1,
+    "n": 120,
+    "xgboost": {
+      "n": 120,
+      "wmape": 7.62,
+      "mae": 14.28,
+      "rmse": 21.03
+    },
+    "wma": {
+      "n": 120,
+      "wmape": 9.35,
+      "mae": 17.51,
+      "rmse": 29.22
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 2,
+    "n": 115,
+    "xgboost": {
+      "n": 115,
+      "wmape": 9.18,
+      "mae": 17.21,
+      "rmse": 26.58
+    },
+    "wma": {
+      "n": 115,
+      "wmape": 11.33,
+      "mae": 21.23,
+      "rmse": 36.29
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 3,
+    "n": 110,
+    "xgboost": {
+      "n": 110,
+      "wmape": 9.97,
+      "mae": 18.66,
+      "rmse": 29.11
+    },
+    "wma": {
+      "n": 110,
+      "wmape": 12.62,
+      "mae": 23.62,
+      "rmse": 39.33
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 4,
+    "n": 105,
+    "xgboost": {
+      "n": 105,
+      "wmape": 10.52,
+      "mae": 19.7,
+      "rmse": 29.95
+    },
+    "wma": {
+      "n": 105,
+      "wmape": 11.72,
+      "mae": 21.95,
+      "rmse": 36.82
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 5,
+    "n": 100,
+    "xgboost": {
+      "n": 100,
+      "wmape": 10.51,
+      "mae": 19.7,
+      "rmse": 28.34
+    },
+    "wma": {
+      "n": 100,
+      "wmape": 10.57,
+      "mae": 19.81,
+      "rmse": 34.23
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 6,
+    "n": 95,
+    "xgboost": {
+      "n": 95,
+      "wmape": 12.2,
+      "mae": 22.93,
+      "rmse": 33.63
+    },
+    "wma": {
+      "n": 95,
+      "wmape": 11.62,
+      "mae": 21.85,
+      "rmse": 36.15
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 7,
+    "n": 90,
+    "xgboost": {
+      "n": 90,
+      "wmape": 12.23,
+      "mae": 23.1,
+      "rmse": 32.81
+    },
+    "wma": {
+      "n": 90,
+      "wmape": 12.2,
+      "mae": 23.03,
+      "rmse": 38.54
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 8,
+    "n": 85,
+    "xgboost": {
+      "n": 85,
+      "wmape": 11.96,
+      "mae": 22.54,
+      "rmse": 32.64
+    },
+    "wma": {
+      "n": 85,
+      "wmape": 13.03,
+      "mae": 24.54,
+      "rmse": 40.0
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 9,
+    "n": 80,
+    "xgboost": {
+      "n": 80,
+      "wmape": 11.48,
+      "mae": 21.51,
+      "rmse": 30.02
+    },
+    "wma": {
+      "n": 80,
+      "wmape": 12.15,
+      "mae": 22.78,
+      "rmse": 37.22
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 10,
+    "n": 75,
+    "xgboost": {
+      "n": 75,
+      "wmape": 11.32,
+      "mae": 21.05,
+      "rmse": 30.44
+    },
+    "wma": {
+      "n": 75,
+      "wmape": 10.8,
+      "mae": 20.1,
+      "rmse": 30.68
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 11,
+    "n": 70,
+    "xgboost": {
+      "n": 70,
+      "wmape": 13.11,
+      "mae": 24.41,
+      "rmse": 35.7
+    },
+    "wma": {
+      "n": 70,
+      "wmape": 9.92,
+      "mae": 18.47,
+      "rmse": 26.89
+    }
+  },
+  {
+    "Plant": "Coimbatore Plant",
+    "horizon": 12,
+    "n": 65,
+    "xgboost": {
+      "n": 65,
+      "wmape": 12.9,
+      "mae": 24.0,
+      "rmse": 34.38
+    },
+    "wma": {
+      "n": 65,
+      "wmape": 10.1,
+      "mae": 18.78,
+      "rmse": 27.13
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 1,
+    "n": 192,
+    "xgboost": {
+      "n": 192,
+      "wmape": 22.23,
+      "mae": 26.27,
+      "rmse": 61.36
+    },
+    "wma": {
+      "n": 192,
+      "wmape": 22.11,
+      "mae": 26.13,
+      "rmse": 55.87
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 2,
+    "n": 184,
+    "xgboost": {
+      "n": 184,
+      "wmape": 21.69,
+      "mae": 25.76,
+      "rmse": 58.27
+    },
+    "wma": {
+      "n": 184,
+      "wmape": 23.43,
+      "mae": 27.84,
+      "rmse": 56.58
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 3,
+    "n": 176,
+    "xgboost": {
+      "n": 176,
+      "wmape": 20.26,
+      "mae": 23.88,
+      "rmse": 51.29
+    },
+    "wma": {
+      "n": 176,
+      "wmape": 24.97,
+      "mae": 29.42,
+      "rmse": 59.32
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 4,
+    "n": 168,
+    "xgboost": {
+      "n": 168,
+      "wmape": 22.44,
+      "mae": 26.49,
+      "rmse": 55.97
+    },
+    "wma": {
+      "n": 168,
+      "wmape": 25.6,
+      "mae": 30.22,
+      "rmse": 59.59
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 5,
+    "n": 160,
+    "xgboost": {
+      "n": 160,
+      "wmape": 25.3,
+      "mae": 30.14,
+      "rmse": 64.15
+    },
+    "wma": {
+      "n": 160,
+      "wmape": 25.64,
+      "mae": 30.56,
+      "rmse": 58.89
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 6,
+    "n": 152,
+    "xgboost": {
+      "n": 152,
+      "wmape": 25.3,
+      "mae": 30.43,
+      "rmse": 66.1
+    },
+    "wma": {
+      "n": 152,
+      "wmape": 26.78,
+      "mae": 32.21,
+      "rmse": 62.31
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 7,
+    "n": 144,
+    "xgboost": {
+      "n": 144,
+      "wmape": 23.16,
+      "mae": 27.59,
+      "rmse": 56.6
+    },
+    "wma": {
+      "n": 144,
+      "wmape": 24.05,
+      "mae": 28.66,
+      "rmse": 49.57
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 8,
+    "n": 136,
+    "xgboost": {
+      "n": 136,
+      "wmape": 23.5,
+      "mae": 27.81,
+      "rmse": 56.19
+    },
+    "wma": {
+      "n": 136,
+      "wmape": 28.54,
+      "mae": 33.77,
+      "rmse": 59.0
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 9,
+    "n": 128,
+    "xgboost": {
+      "n": 128,
+      "wmape": 22.15,
+      "mae": 26.43,
+      "rmse": 52.32
+    },
+    "wma": {
+      "n": 128,
+      "wmape": 24.93,
+      "mae": 29.74,
+      "rmse": 53.37
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 10,
+    "n": 120,
+    "xgboost": {
+      "n": 120,
+      "wmape": 22.44,
+      "mae": 26.76,
+      "rmse": 53.52
+    },
+    "wma": {
+      "n": 120,
+      "wmape": 23.61,
+      "mae": 28.15,
+      "rmse": 57.73
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 11,
+    "n": 112,
+    "xgboost": {
+      "n": 112,
+      "wmape": 20.91,
+      "mae": 25.09,
+      "rmse": 48.67
+    },
+    "wma": {
+      "n": 112,
+      "wmape": 22.74,
+      "mae": 27.3,
+      "rmse": 58.67
+    }
+  },
+  {
+    "Plant": "Delhi Plant",
+    "horizon": 12,
+    "n": 104,
+    "xgboost": {
+      "n": 104,
+      "wmape": 23.35,
+      "mae": 27.82,
+      "rmse": 58.09
+    },
+    "wma": {
+      "n": 104,
+      "wmape": 21.43,
+      "mae": 25.52,
+      "rmse": 53.48
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 1,
+    "n": 192,
+    "xgboost": {
+      "n": 192,
+      "wmape": 7.02,
+      "mae": 10.6,
+      "rmse": 20.95
+    },
+    "wma": {
+      "n": 192,
+      "wmape": 14.21,
+      "mae": 21.47,
+      "rmse": 66.14
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 2,
+    "n": 184,
+    "xgboost": {
+      "n": 184,
+      "wmape": 7.85,
+      "mae": 11.89,
+      "rmse": 26.02
+    },
+    "wma": {
+      "n": 184,
+      "wmape": 19.45,
+      "mae": 29.5,
+      "rmse": 86.08
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 3,
+    "n": 176,
+    "xgboost": {
+      "n": 176,
+      "wmape": 7.46,
+      "mae": 11.33,
+      "rmse": 22.92
+    },
+    "wma": {
+      "n": 176,
+      "wmape": 23.87,
+      "mae": 36.27,
+      "rmse": 98.85
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 4,
+    "n": 168,
+    "xgboost": {
+      "n": 168,
+      "wmape": 7.65,
+      "mae": 11.65,
+      "rmse": 26.12
+    },
+    "wma": {
+      "n": 168,
+      "wmape": 24.87,
+      "mae": 37.85,
+      "rmse": 101.12
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 5,
+    "n": 160,
+    "xgboost": {
+      "n": 160,
+      "wmape": 7.87,
+      "mae": 11.87,
+      "rmse": 29.81
+    },
+    "wma": {
+      "n": 160,
+      "wmape": 24.52,
+      "mae": 36.99,
+      "rmse": 99.54
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 6,
+    "n": 152,
+    "xgboost": {
+      "n": 152,
+      "wmape": 8.53,
+      "mae": 12.71,
+      "rmse": 25.99
+    },
+    "wma": {
+      "n": 152,
+      "wmape": 23.41,
+      "mae": 34.89,
+      "rmse": 94.93
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 7,
+    "n": 144,
+    "xgboost": {
+      "n": 144,
+      "wmape": 7.86,
+      "mae": 11.59,
+      "rmse": 18.04
+    },
+    "wma": {
+      "n": 144,
+      "wmape": 21.18,
+      "mae": 31.23,
+      "rmse": 86.52
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 8,
+    "n": 136,
+    "xgboost": {
+      "n": 136,
+      "wmape": 8.18,
+      "mae": 12.13,
+      "rmse": 19.92
+    },
+    "wma": {
+      "n": 136,
+      "wmape": 20.37,
+      "mae": 30.21,
+      "rmse": 81.69
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 9,
+    "n": 128,
+    "xgboost": {
+      "n": 128,
+      "wmape": 8.13,
+      "mae": 12.12,
+      "rmse": 18.6
+    },
+    "wma": {
+      "n": 128,
+      "wmape": 18.43,
+      "mae": 27.5,
+      "rmse": 75.21
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 10,
+    "n": 120,
+    "xgboost": {
+      "n": 120,
+      "wmape": 7.91,
+      "mae": 11.88,
+      "rmse": 19.54
+    },
+    "wma": {
+      "n": 120,
+      "wmape": 13.8,
+      "mae": 20.73,
+      "rmse": 59.49
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 11,
+    "n": 112,
+    "xgboost": {
+      "n": 112,
+      "wmape": 7.87,
+      "mae": 11.91,
+      "rmse": 20.63
+    },
+    "wma": {
+      "n": 112,
+      "wmape": 9.21,
+      "mae": 13.93,
+      "rmse": 38.65
+    }
+  },
+  {
+    "Plant": "Pune Plant",
+    "horizon": 12,
+    "n": 104,
+    "xgboost": {
+      "n": 104,
+      "wmape": 8.77,
+      "mae": 13.4,
+      "rmse": 22.88
+    },
+    "wma": {
+      "n": 104,
+      "wmape": 8.33,
+      "mae": 12.73,
+      "rmse": 27.67
+    }
+  }
+]
