@@ -1,5 +1,7 @@
 const ForecastPredictions = require("../models/ForecastPredictions");
 const mlServiceClient = require("../services/mlServiceClient");
+const { currentFinancialYearStart, forecastStartYear } = require("../utils/forecastTargets");
+const { finYearLabel } = require("../utils/financialYear");
 
 /**
  * GET /api/forecast/status — Admin only. Whether the ML service is
@@ -44,15 +46,31 @@ async function runBacktest(req, res) {
  * POST /api/forecast/generate — Admin only. Manually triggered (Section
  * 18: "Do not retrain the model every time Planning Master is opened" —
  * this is the explicit trigger that stands in for a future scheduler).
+ *
+ * Phase B: generates the next 6 months of forecasts (H1-H6) anchored at
+ * the FY following the current FY, derived from the server clock. Client
+ * body params are accepted but ignored — the window is always computed
+ * server-side for correctness.
+ *
  * Calls the ML service, then upserts every Material+Plant+Month
  * prediction into ForecastPredictions — one document per period, so
  * re-generating overwrites the prior prediction for that exact period
  * rather than accumulating duplicates (see the model's unique index).
+ *
+ * Phase B cleanup: stale production forecasts from the previous 36-month
+ * window (horizons 7-36) are deleted after the new 6-month generation, so
+ * the collection never holds out-of-window/orphaned quarters that Planning
+ * Master would otherwise render.
  */
 async function generateForecast(req, res) {
   try {
-    const horizonMonths = Number(req.body?.horizonMonths) || 12;
-    const result = await mlServiceClient.requestForecast(horizonMonths);
+    const now = new Date();
+    const currentFy = currentFinancialYearStart(now);
+    const startYear = forecastStartYear(currentFy); // FY start year of first forecast month
+    const startFinancialYear = finYearLabel(startYear); // e.g. "2027-28"
+    const horizonMonths = 6; // Phase B: production horizon reduced from 36 to 6
+
+    const result = await mlServiceClient.requestForecast({ horizonMonths, startFinancialYear });
 
     const generatedAt = new Date();
     const ops = result.forecasts.map((f) => ({
@@ -63,7 +81,7 @@ async function generateForecast(req, res) {
             materialNo: f.materialNo, plant: f.plant, financialYear: f.financialYear,
             month: f.month, quarter: f.quarter, predictedSalesQty: f.predictedSalesQty,
             model: f.model, modelVersion: f.modelVersion, generatedAt,
-            monthsAheadInHorizon: f.monthsAheadInHorizon,
+            monthsAheadInHorizon: f.monthsAheadInHorizon, horizonMonths: result.horizonMonths || horizonMonths,
             confidence: f.confidence, confidenceTier: f.confidenceTier,
             segmentWmape: f.segmentWmape, horizonAdjustedWmape: f.horizonAdjustedWmape, historyMonths: f.historyMonths,
             trend: f.trend, seasonality: f.seasonality, seasonalityPeakQuarter: f.seasonalityPeakQuarter,
@@ -76,17 +94,29 @@ async function generateForecast(req, res) {
 
     if (ops.length > 0) await ForecastPredictions.bulkWrite(ops);
 
+    // Phase B: remove stale H7-H36 production forecasts left over from the
+    // previous 36-month generation. The 6-month window only produces
+    // horizons 1-6; anything beyond that is no longer generated and must not
+    // remain (Planning Master would otherwise show orphaned out-of-window
+    // quarters). Rows within the window are untouched — upsert overwrites them.
+    const stale = await ForecastPredictions.deleteMany({
+      monthsAheadInHorizon: { $gt: horizonMonths },
+    });
+
     const modelCounts = result.forecasts.reduce((acc, f) => {
       acc[f.model] = (acc[f.model] || 0) + 1;
       return acc;
     }, {});
 
     res.json({
-      message: `Generated and stored ${ops.length} forecast predictions.`,
+      message: `Generated and stored ${ops.length} forecast predictions (${horizonMonths}-month horizon anchored at ${startFinancialYear}).`,
       dataSource: result.dataSource,
       modelVersion: result.modelVersion,
-      horizonMonths: result.horizonMonths,
+      horizonMonths,
+      startFinancialYear,
+      currentFY: finYearLabel(currentFy),
       predictionsStored: ops.length,
+      stalePredictionsRemoved: stale.deletedCount,
       modelUsage: modelCounts,
       generatedAt,
     });

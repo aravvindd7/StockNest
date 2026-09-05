@@ -34,12 +34,22 @@ async function checkHealth() {
   return callMlService("/health");
 }
 
-/** Returns { modelVersion, horizonMonths, dataSource, forecasts: [...] } — see ml-service/app/forecast.py. */
-async function requestForecast(horizonMonths = 12) {
+/**
+ * Returns { modelVersion, horizonMonths, startFinancialYear, dataSource,
+ *            forecasts: [...] } — see ml-service/app/forecast.py.
+ *
+ * startFinancialYear: optional FY label string (e.g. "2027-28") that
+ * anchors the forecast window — the ML service fast-forwards to this
+ * FY before emitting rows, so the first emitted month is April of that
+ * FY. Absent = existing behavior (forecast from next month onward).
+ */
+async function requestForecast({ horizonMonths = 12, startFinancialYear } = {}) {
+  const body = { horizonMonths };
+  if (startFinancialYear) body.startFinancialYear = startFinancialYear;
   return callMlService("/forecast", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ horizonMonths }),
+    body: JSON.stringify(body),
   });
 }
 

@@ -34,4 +34,24 @@ EXCEL_FALLBACK_PATH = Path(os.environ.get("SALES_EXCEL_FALLBACK_PATH", str(_DEFA
 # prediction for a Material+Plant series — Phase 4 Section 9/12.
 MIN_TRAINING_MONTHS = 12
 
+# Production training window (months of most-recent history used to train).
+# Phase B: empirically benchmarked as optimal (10.19% overall WMAPE vs
+# 12.06% for full history) — an 18-month rolling window of the latest
+# available sales per Material+Plant series.
+TRAINING_WINDOW_MONTHS = 18
+
+# Production forecast horizon (months ahead).
+# Phase B: reduced from 12 (a full FY) to 6 — see ForecastRequest default.
+FORECAST_HORIZON_MONTHS = 6
+
 MODEL_VERSION = "v1"
+
+# Cap for the empirical multi-step backtest horizon. Horizons beyond this
+# are sparsely evaluable (insufficient trailing actuals for origins), and
+# apply_empirical_horizon_adjustment already falls back to the max measured
+# multiplier — so running the backtest past this adds cost without benefit.
+#
+# Phase B: capped at FORECAST_HORIZON_MONTHS (6) to mirror the production
+# horizon exactly — confidence is calibrated on the same H1-H6 range the
+# production forecast produces.
+EMPIRICAL_BACKTEST_MAX_HORIZON = FORECAST_HORIZON_MONTHS

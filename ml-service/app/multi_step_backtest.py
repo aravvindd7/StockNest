@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from app.config import MIN_TRAINING_MONTHS
+from app.config import MIN_TRAINING_MONTHS, TRAINING_WINDOW_MONTHS
 from app.features import ALL_FEATURES, CATEGORICAL_FEATURES, TARGET, to_categorical_dtypes, build_recursive_step_row, MONTH_ORDER, QUARTER_BY_MONTH
 from app.wma_baseline import wma_predict
 from app.backtest import wmape, mae, rmse
@@ -54,13 +54,18 @@ def determine_origins(max_month_index: int, min_training_months: int = MIN_TRAIN
     return list(range(min_training_months, max_month_index + 1))
 
 
-def run_multi_step_backtest(feat: pd.DataFrame, max_horizon: int = 12, min_training_months: int = MIN_TRAINING_MONTHS) -> pd.DataFrame:
+def run_multi_step_backtest(feat: pd.DataFrame, max_horizon: int = 6, min_training_months: int = MIN_TRAINING_MONTHS, training_window_months: int = TRAINING_WINDOW_MONTHS) -> pd.DataFrame:
     """
     feat: output of features.build_feature_table (must include month_index).
     Returns a row-level DataFrame: one row per (MatNo, Plant, origin,
     horizon) evaluated prediction — actual, xgb_pred, wma_pred — ready for
     horizon-level, material-level, plant-level, and material x horizon
     aggregation.
+
+    Phase B: default max_horizon is now 6 (matching the production forecast
+    horizon) and each origin trains on the most recent training_window_months
+    (18) of history before the origin — the same rolling window used by the
+    production model, so backtest and production see the same data.
     """
     feat_cat = to_categorical_dtypes(feat)
     max_month_index = int(feat["month_index"].max())
@@ -80,7 +85,12 @@ def run_multi_step_backtest(feat: pd.DataFrame, max_horizon: int = 12, min_train
     result_rows: List[Dict] = []
 
     for origin in origins:
+        # Phase B: rolling training window — train only on the most recent
+        # training_window_months before the origin, never the full history.
         train_df = feat_cat[feat_cat["month_index"] < origin]
+        if training_window_months:
+            cutoff = origin - training_window_months
+            train_df = train_df[train_df["month_index"] >= cutoff]
         if train_df.empty:
             continue
         max_evaluable_h = min(max_horizon, max_month_index - origin + 1)

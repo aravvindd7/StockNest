@@ -18,6 +18,7 @@ Endpoints:
 Run with: uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
 import logging
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -36,11 +37,12 @@ app = FastAPI(title="StockNest ML Service", version=MODEL_VERSION)
 
 
 class ForecastRequest(BaseModel):
-    horizonMonths: int = 12
+    horizonMonths: int = 6  # Phase B: production horizon reduced from 12 to 6
+    startFinancialYear: Optional[str] = None  # optional FY label anchor, e.g. "2027-28"
 
 
 class BacktestRequest(BaseModel):
-    maxHorizon: int = 12  # Phase 6: how many recursive horizons to evaluate; 1 would reduce to Phase 4's original single-step behavior
+    maxHorizon: int = 6  # Phase B: backtest capped at the production horizon (6); 1 would reduce to Phase 4's original single-step behavior
 
 
 @app.get("/health")
@@ -127,7 +129,7 @@ def forecast(req: ForecastRequest):
     """
     try:
         df, source = load_sales_history()
-        result = generate_forecasts(df, horizon_months=req.horizonMonths)
+        result = generate_forecasts(df, horizon_months=req.horizonMonths, start_financial_year=req.startFinancialYear)
         result["dataSource"] = source
         return result
     except Exception as exc:  # noqa: BLE001

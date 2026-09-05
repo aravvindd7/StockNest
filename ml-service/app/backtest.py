@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from app.config import MIN_TRAINING_MONTHS
+from app.config import MIN_TRAINING_MONTHS, TRAINING_WINDOW_MONTHS
 from app.features import ALL_FEATURES, CATEGORICAL_FEATURES, TARGET, to_categorical_dtypes
 from app.wma_baseline import wma_predict
 
@@ -46,12 +46,16 @@ def rmse(actual: np.ndarray, forecast: np.ndarray) -> float:
     return float(np.sqrt(np.mean((actual - forecast) ** 2)))
 
 
-def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MONTHS) -> pd.DataFrame:
+def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MONTHS, training_window_months: int = TRAINING_WINDOW_MONTHS) -> pd.DataFrame:
     """
     feat: output of features.build_feature_table (must include month_index).
     Returns a row-level DataFrame: one row per (MatNo, Plant, month_index)
     backtest prediction, with columns actual, wma_pred, xgb_pred — ready
     for both overall and segment-level metric aggregation.
+
+    Phase B: each step trains on the most recent training_window_months
+    (18) of history before the step — the same rolling window as the
+    production model, so backtest and production see the same data.
     """
     feat = to_categorical_dtypes(feat)
     max_month_index = int(feat["month_index"].max())
@@ -66,6 +70,9 @@ def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MON
     rows: List[Dict] = []
     for step in eval_steps:
         train_df = feat[feat["month_index"] < step]
+        if training_window_months:
+            cutoff = step - training_window_months
+            train_df = train_df[train_df["month_index"] >= cutoff]
         predict_df = feat[feat["month_index"] == step]
         if train_df.empty or predict_df.empty:
             continue

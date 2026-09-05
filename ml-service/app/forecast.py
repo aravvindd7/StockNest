@@ -2,10 +2,11 @@
 Live forecast generation — separate from backtest.py (Phase 4 Section 18:
 "Separate TRAINING/BACKTESTING from LIVE FORECAST INFERENCE").
 
-Produces a 12-month-ahead forecast (the next financial year's worth of
-months) per Material+Plant series, by:
-  1. Training ONE XGBoost model on ALL currently available history
-     (not a walk-forward backtest — this is the production model).
+Produces a 6-month-ahead forecast (Phase B: reduced from 12 months) per
+Material+Plant series, by:
+  1. Training ONE XGBoost model on the most recent TRAINING_WINDOW_MONTHS
+     (18) months of currently available history (not a walk-forward
+     backtest — this is the production model).
   2. RECURSIVELY forecasting forward one month at a time: month N+1 uses
      only real historical data; month N+2's lag/rolling features are then
      built using month N+1's *prediction* (there is no way around this for
@@ -21,13 +22,13 @@ fewer than MIN_TRAINING_MONTHS of real history is skipped entirely by
 XGBoost and flagged `"model": "WMA_FALLBACK"` with a WMA-based forecast
 instead — never a meaningless prediction from an undertrained model.
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from app.config import MIN_TRAINING_MONTHS, MODEL_VERSION
+from app.config import MIN_TRAINING_MONTHS, MODEL_VERSION, EMPIRICAL_BACKTEST_MAX_HORIZON, TRAINING_WINDOW_MONTHS
 from app.features import ALL_FEATURES, CATEGORICAL_FEATURES, TARGET, build_feature_table, to_categorical_dtypes, build_recursive_step_row, MONTH_ORDER, QUARTER_BY_MONTH
 from app.wma_baseline import wma_predict
 from app.backtest import run_backtest, segment_summary
@@ -50,7 +51,15 @@ def _next_month(financial_year: str, month: str):
 
 
 def train_production_model(feat: pd.DataFrame) -> xgb.XGBRegressor:
-    trainable = feat.dropna(subset=["lag1"])  # exclude rows with literally no prior history at all
+    # Phase B: train on the most recent TRAINING_WINDOW_MONTHS (18) months
+    # of history only — the empirically-benchmarked optimal window. Using
+    # only recent data avoids diluting current demand patterns with stale
+    # older history. Rows with literally no prior history are still excluded.
+    trainable = feat.dropna(subset=["lag1"])
+    if len(trainable) > TRAINING_WINDOW_MONTHS:
+        # The most recent months are the largest month_index values.
+        cutoff = trainable["month_index"].max() - TRAINING_WINDOW_MONTHS + 1
+        trainable = trainable[trainable["month_index"] >= cutoff]
     model = xgb.XGBRegressor(
         n_estimators=300, max_depth=4, learning_rate=0.06, subsample=0.9, colsample_bytree=0.9,
         tree_method="hist", enable_categorical=True, random_state=42, missing=np.nan,
@@ -59,16 +68,23 @@ def train_production_model(feat: pd.DataFrame) -> xgb.XGBRegressor:
     return model
 
 
-def generate_forecasts(sales_df: pd.DataFrame, horizon_months: int = 12) -> Dict:
+def generate_forecasts(sales_df: pd.DataFrame, horizon_months: int = 12, start_financial_year: Optional[str] = None) -> Dict:
     """
     Returns {
-      "modelVersion": "...", "horizonMonths": 12,
+      "modelVersion": "...", "horizonMonths": <requested>,
+      "startFinancialYear": <passed anchor or null>,
       "forecasts": [ { materialNo, plant, financialYear, month, quarter,
                         predictedSalesQty, model, monthsAheadInHorizon,
                         confidence, confidenceTier, confidenceReason,
                         segmentWmape, historyMonths, trend, seasonality,
                         reason }, ... ]
     }
+
+    When start_financial_year is provided (e.g. "2027-28"), the loop
+    fast-forwards each series to that FY before emitting rows — months
+    before the anchor are still recursed (their predictions feed lag
+    features) but not stored. monthsAheadInHorizon stays the honest
+    distance from the last real data month.
 
     Confidence/trend/seasonality/reason are computed ONCE per generation
     call (not per Planning Master page view — see this phase's Part 1
@@ -96,8 +112,15 @@ def generate_forecasts(sales_df: pd.DataFrame, horizon_months: int = 12) -> Dict
     # assumption with real measured evidence. If this fails for any reason
     # (should not normally happen), fall back to no horizon adjustment
     # rather than crashing forecast generation entirely.
+    #
+    # Cap empirical backtest at EMPIRICAL_BACKTEST_MAX_HORIZON: horizons
+    # beyond that are sparsely evaluable (insufficient trailing actuals for
+    # origins), and apply_empirical_horizon_adjustment already falls back
+    # to the max measured multiplier — so running the backtest past this
+    # adds compute cost without improving calibration.
+    empirical_max = min(horizon_months, EMPIRICAL_BACKTEST_MAX_HORIZON)
     try:
-        multi_step_results = run_multi_step_backtest(feat, max_horizon=horizon_months)
+        multi_step_results = run_multi_step_backtest(feat, max_horizon=empirical_max)
         horizon_multipliers = empirical_horizon_multipliers(horizon_profile(multi_step_results))
     except Exception:  # noqa: BLE001
         horizon_multipliers = None
@@ -142,7 +165,30 @@ def generate_forecasts(sales_df: pd.DataFrame, horizon_months: int = 12) -> Dict
         trend = material_trend.get(matno, {"label": "insufficient_history", "pctPerYear": None})
         seasonality = material_seasonality.get(matno, {"label": "insufficient_history", "strength": None, "peakQuarter": None})
 
-        for step in range(1, horizon_months + 1):
+        # Anchor-based fast-forward: when start_financial_year is given,
+        # skip months before that FY (recursing through them for lag
+        # feature continuity) but don't emit them. step counts the true
+        # distance from the last real month so confidence decay stays honest.
+        #
+        # The main loop advances the month BEFORE emitting, so we stop one
+        # month before the anchor FY's first month (April). That makes April
+        # of the anchor FY the FIRST emitted row and keeps the window to
+        # exactly the requested complete FYs — otherwise the loop skips
+        # April and shifts the whole window one month into the FY after the
+        # last requested one.
+        anchor_year_int = int(start_financial_year.split("-")[0]) if start_financial_year else None
+        step = 0
+        if anchor_year_int is not None:
+            while True:
+                next_fy, next_month = _next_month(fy, month)
+                if int(next_fy.split("-")[0]) >= anchor_year_int:
+                    break
+                fy, month = next_fy, next_month
+                step += 1
+
+        emitted = 0
+        while emitted < horizon_months:
+            step += 1
             fy, month = _next_month(fy, month)
             quarter = QUARTER_BY_MONTH[month]
 
@@ -192,5 +238,11 @@ def generate_forecasts(sales_df: pd.DataFrame, horizon_months: int = 12) -> Dict
                 "seasonalityPeakQuarter": seasonality.get("peakQuarter"),
                 "reason": reason,
             })
+            emitted += 1
 
-    return {"modelVersion": MODEL_VERSION, "horizonMonths": horizon_months, "forecasts": forecasts}
+    return {
+        "modelVersion": MODEL_VERSION,
+        "horizonMonths": horizon_months,
+        "startFinancialYear": start_financial_year,
+        "forecasts": forecasts,
+    }

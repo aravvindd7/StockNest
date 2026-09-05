@@ -52,6 +52,12 @@ const forecastPredictionSchema = new mongoose.Schema(
     seasonality: { type: String },
     seasonalityPeakQuarter: { type: String },
     reason: { type: String },
+
+    // Rolling multi-year metadata — records how many total months the
+    // generation request targeted (e.g. 36), so the frontend and
+    // planningService can display the correct denominator in the forecast
+    // horizon label without assuming 12.
+    horizonMonths: { type: Number },
   },
   { timestamps: true }
 );

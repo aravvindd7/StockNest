@@ -2,12 +2,13 @@ const planningService = require("../services/planningService");
 
 /**
  * GET /api/planning/years — Admin only.
- * Thin HTTP layer — all logic lives in services/planningService.js.
+ * Returns { years: [...], currentFY } — options include current, historical,
+ * and future (forecast) financial years with flags.
  */
 async function getAvailableStartYears(_req, res) {
   try {
-    const years = await planningService.getAvailableStartYears();
-    res.json({ years });
+    const result = await planningService.getAvailableStartYears();
+    res.json(result);
   } catch (err) {
     console.error("[planningController.getAvailableStartYears]", err);
     res.status(500).json({ message: "Internal server error while fetching available financial years." });
@@ -27,18 +28,29 @@ function readNumberFilter(query, key) {
 }
 
 /**
- * GET /api/planning — Admin only. Query params: search, startYear.
- * Thin HTTP layer — all aggregation and forecasting logic lives in
- * services/planningService.js. This controller never touches Material,
- * Stock, or Sales directly.
+ * GET /api/planning — Admin only. Query params: search, viewYears
+ * (comma-separated FY start years, e.g. "2025,2026,2027"), trend,
+ * stockRisk, growthPct, confidence.
+ *
+ * Returns the 3-slot FY comparison — three independent, user-selectable FY
+ * column groups. Defaults (when viewYears is absent) to Previous | Current
+ * | Next-Forecast FY. Thin HTTP layer — all aggregation and forecasting
+ * logic lives in services/planningService.js. This controller never touches
+ * Material, Stock, or Sales directly.
  */
 async function getPlanningData(req, res) {
   try {
-    const { search, startYear, trend, stockRisk } = req.query;
+    const { search, viewYears, trend, stockRisk } = req.query;
     const growthPct = readNumberFilter(req.query, "growthPct");
     const confidence = readNumberFilter(req.query, "confidence");
 
-    const result = await planningService.buildPlanningView({ search, startYear, trend, stockRisk, growthPct, confidence });
+    const parsedYears = viewYears
+      ? String(viewYears).split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n))
+      : undefined;
+
+    const result = await planningService.buildPlanningView({
+      search, trend, stockRisk, growthPct, confidence, viewYears: parsedYears,
+    });
     res.json(result);
   } catch (err) {
     console.error("[planningController.getPlanningData]", err);
