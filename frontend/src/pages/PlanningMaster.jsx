@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import PlanningTable from "../components/PlanningTable";
 import ForecastDrawer from "../components/ForecastDrawer";
+import PlanDetailsDrawer from "../components/PlanDetailsDrawer";
 import FilterManager from "../components/table/FilterManager";
 import { useTableFilters } from "../components/table/useTableFilters";
-import { fetchPlanningComparison, fetchPlanningYears, regenerateForecast } from "../services/planningService";
+import { fetchPlanningComparison, regenerateForecast } from "../services/planningService";
 
 // Planning Master's filters are the "intelligent" kind (Trend, Growth %,
 // Forecast Confidence, Stock Risk) — there's no natural per-column icon
@@ -28,75 +29,57 @@ const ADVANCED_FIELDS = [
 ];
 
 /**
- * Planning Master — read-only 3-slot FY comparison and decision screen
- * across Material, Stock, and Sales Master. No Add/Edit/Delete/Import/
- * Export/Refresh/model selector — this page only ever calls GET (plus the
- * explicit admin-only Regenerate Forecast trigger), and the forecasting
- * engine runs server-side (services/planningService.js).
+ * Planning Master — read-only fixed Active-FY operational timeline across
+ * Material, Stock, Sales Master, and ForecastPredictions. No Add/Edit/
+ * Delete/Import/Export/Refresh/model selector — this page only ever calls
+ * GET (plus the explicit admin-only Regenerate Forecast trigger), and the
+ * forecasting engine runs server-side (services/planningService.js).
  *
- * Three independent FY column groups, defaulting to Previous | Current |
- * Next-Forecast FY (2025-26 | 2026-27 | 2027-28). Each group's FY can be
- * changed in place via the dropdown embedded in that group's own header.
- * The table always shows the three slots side by side; changing a slot's
- * FY only changes that column's data scope.
+ * The table shows a fixed, clock-derived window of three FY groups:
+ * Previous FY | Previous FY | Active FY (e.g. 2024-25 | 2025-26 | 2026-27
+ * ACTIVE). The Active FY is a per-month hybrid of actuals + forecast. PLAN
+ * (the current working quarter's demand) and REQUIRED STOCK sit alongside
+ * it as the operational decision layer.
  */
 export default function PlanningMaster() {
   const filterState = useTableFilters({ filterConfig: FILTER_CONFIG });
 
   const [groups, setGroups] = useState([]);
-  const [availableYears, setAvailableYears] = useState([]);
-  const [fySelections, setFySelections] = useState([]); // 3 independent FY start years
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const [timeline, setTimeline] = useState(null); // { activeFY, workingQuarter, activeMonth, previousFY, hasForecastData }
   const [drawerTarget, setDrawerTarget] = useState(null); // { row, fyValue, quarter, mode } | null
+  const [planTarget, setPlanTarget] = useState(null); // row | null → Plan Details sidebar
   const [regenerating, setRegenerating] = useState(false);
 
-  // Load the selectable FY list once (historical + current + forecast) and
-  // default the three slots to Previous | Current | Next-Forecast FY.
-  useEffect(() => {
-    fetchPlanningYears()
-      .then((result) => {
-        const current = result.currentFY.value;
-        // Planning Master exposes actual FYs plus only the immediate next
-        // forecast FY. Keep this UI contract even while an older API process
-        // may still return its former multi-year forecast option list.
-        setAvailableYears(result.years.filter((year) => year.value <= current + 1));
-        setFySelections([current - 1, current, current + 1]);
-      })
-      .catch(() => {});
-  }, []);
-
   const load = useCallback(async () => {
-    if (fySelections.length !== 3) return; // wait for the default slot setup
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchPlanningComparison({ ...filterState.queryParams, viewYears: fySelections });
+      const result = await fetchPlanningComparison({ ...filterState.queryParams });
       setGroups(result.groups);
       setRows(result.data);
+      setTimeline({
+        activeFY: result.activeFY,
+        workingQuarter: result.workingQuarter,
+        activeMonth: result.activeMonth,
+        previousFY: result.previousFY,
+        hasForecastData: result.hasForecastData,
+      });
     } catch (err) {
       setError(err.response?.data?.message || "Could not load the planning view. Is the backend running?");
     } finally {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterState.queryParams, fySelections]);
+  }, [filterState.queryParams]);
 
   useEffect(() => {
     const t = setTimeout(load, 300);
     return () => clearTimeout(t);
   }, [load]);
-
-  const handleChangeYear = (index, value) => {
-    setDrawerTarget(null);
-    setFySelections((prev) => {
-      const next = [...prev];
-      next[index] = value;
-      return next;
-    });
-  };
 
   const handleRegenerate = async () => {
     setRegenerating(true);
@@ -111,18 +94,29 @@ export default function PlanningMaster() {
     }
   };
 
+  // A quarter cell's mode decides which drawer opens. The service marks cells
+  // "actual" | "forecast" | "none", while the drawer contract is
+  // "historical" | "forecast" — normalize at this routing boundary:
+  //   - forecast-backed cell  → Forecast Details drawer
+  //   - actual cell (historical FY, or an elapsed Active FY quarter)
+  //   → the historical/actual drawer
+  //   - "none" cells are never rendered clickable.
+  // This keeps a purely historical quarter out of the Forecast branch.
   const handleCellClick = (row, fyValue, quarter) => {
-    const group = groups.find((g) => g.viewYear.value === fyValue);
-    setDrawerTarget({ row, fyValue, quarter, mode: group?.isForecastYear ? "forecast" : "historical" });
+    const block = row.years?.[fyValue];
+    const cellMode = block?.quarters?.[quarter]?.mode;
+    if (!cellMode || cellMode === "none") return;
+    const mode = cellMode === "forecast" ? "forecast" : "historical";
+    setDrawerTarget({ row, fyValue, quarter, mode });
   };
+
+  const handlePlanClick = (row) => setPlanTarget(row);
 
   // Resolve the drawer's payload from the clicked cell.
   const target = drawerTarget;
   const targetGroup = target ? groups.find((g) => g.viewYear.value === target.fyValue) : null;
   const targetBlock = target ? target.row?.years?.[target.fyValue] : null;
-  const targetCell = targetBlock
-    ? (targetGroup?.isForecastYear ? targetBlock.forecast?.quarters?.[target.quarter] : targetBlock.quarters?.[target.quarter])
-    : null;
+  const targetCell = targetBlock ? targetBlock.quarters?.[target.quarter] : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -130,10 +124,10 @@ export default function PlanningMaster() {
         <div>
           <h2 className="font-display text-xl font-bold">Planning Master</h2>
           <p className="text-sm text-gray-500">
-            Read-only 3-financial-year comparison (default: previous · current · next forecast) — sourced from Material,
-            Stock, and Sales Master. Use each column's header filter to point a column at a different financial year.
-            Click a historical/current-year quarter for actual monthly sales, or a forecast quarter for forecast details
-            and the inventory decision.
+            Read-only fixed Active-FY operational timeline (Previous FY · Previous FY · Active FY) — derived from the
+            server clock and rolling forward automatically. The Active FY mixes elapsed months' real Sales Master actuals
+            with future months' existing forecast. Click an actual quarter for monthly sales, a forecast quarter for
+            forecast details, or a PLAN cell for the working-quarter plan.
           </p>
         </div>
 
@@ -185,17 +179,20 @@ export default function PlanningMaster() {
         <PlanningTable
           groups={groups}
           rows={rows}
-          availableYears={availableYears}
-          onChangeYear={handleChangeYear}
           loading={loading}
           onCellClick={handleCellClick}
+          onPlanClick={handlePlanClick}
+          workingQuarter={timeline?.workingQuarter}
+          activeFY={timeline?.activeFY}
+          hasForecastData={Boolean(timeline?.hasForecastData)}
         />
       )}
 
       <p className="text-xs text-gray-400">
         Safety Stock is a computed heuristic (half of average quarterly sales) — Stock Master doesn't currently store a
-        dedicated safety-stock value. Forecast quarters are generated by the ML pipeline and are clickable for details;
-        historical/current-year quarter cells open the actual monthly sales for that quarter.
+        dedicated safety-stock value. REQUIRED STOCK is the immediate demand gap (working-quarter plan demand minus
+        current stock), deliberately excluding safety stock; the separate inventory/replenishment decision shows in a
+        forecast quarter's details. Forecast months are generated by the ML pipeline.
       </p>
 
       <ForecastDrawer
@@ -207,7 +204,16 @@ export default function PlanningMaster() {
         yearLabel={targetGroup?.viewYear?.label}
         cell={targetCell}
         decision={target?.mode === "forecast" ? target?.row?.inventoryDecision?.[target?.quarter] : null}
-        source={targetGroup?.isForecastYear ? targetBlock?.forecast?.source : null}
+        source={target?.mode === "forecast" ? targetCell?.source : null}
+      />
+
+      <PlanDetailsDrawer
+        open={Boolean(planTarget)}
+        onClose={() => setPlanTarget(null)}
+        row={planTarget}
+        activeFY={timeline?.activeFY}
+        workingQuarter={timeline?.workingQuarter}
+        activeMonth={timeline?.activeMonth}
       />
     </div>
   );

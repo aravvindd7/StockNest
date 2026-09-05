@@ -29,6 +29,18 @@ const DECISION_STATUS_COLOR = {
   SURPLUS: "text-primary",
 };
 
+// Small Actual/Forecast tag next to a month — only rendered when the monthly
+// item carries a `source` (visible for the Active FY's mixed quarters).
+function SourceTag({ source }) {
+  if (source === "actual") {
+    return <span className="rounded bg-healthy/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-healthy">Actual</span>;
+  }
+  if (source === "forecast") {
+    return <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent">Forecast</span>;
+  }
+  return null;
+}
+
 export default function ForecastDrawer({ open, onClose, mode = "forecast", row, quarter, yearLabel, cell, decision, source }) {
   const isHistorical = mode === "historical";
   const modelLabel = source ? MODEL_LABELS[source] || source : null;
@@ -96,7 +108,10 @@ export default function ForecastDrawer({ open, onClose, mode = "forecast", row, 
                             key={m.month}
                             className={`flex items-center justify-between px-4 py-2.5 text-sm ${i % 2 === 1 ? "bg-gray-50" : "bg-white"}`}
                           >
-                            <span className="text-gray-600">{m.month}</span>
+                            <span className="flex items-center gap-2 text-gray-600">
+                              {m.month}
+                              <SourceTag source={m.source} />
+                            </span>
                             <span className="font-mono font-semibold">{m.qty.toLocaleString("en-IN")}</span>
                           </div>
                         ))
@@ -116,8 +131,8 @@ export default function ForecastDrawer({ open, onClose, mode = "forecast", row, 
                 <>
                   <div className="grid grid-cols-2 gap-4">
                     <StatBlock label="Forecast Quantity" value={`${cell.qty.toLocaleString("en-IN")} Units`} accent />
-                    <StatBlock label="Forecast Confidence" value={`${cell.confidence}%`} />
-                    <StatBlock label="Growth" value={`${cell.growthPct >= 0 ? "+" : ""}${cell.growthPct}%`} tone={cell.growthPct >= 0 ? "up" : "down"} />
+                    {Number.isFinite(cell.confidence) && <StatBlock label="Forecast Confidence" value={`${cell.confidence}%`} />}
+                    {Number.isFinite(cell.growthPct) && <StatBlock label="Growth" value={`${cell.growthPct >= 0 ? "+" : ""}${cell.growthPct}%`} tone={cell.growthPct >= 0 ? "up" : "down"} />}
                     <StatBlock label="Quarter" value={`${quarter} · ${yearLabel}`} />
                   </div>
 
@@ -170,7 +185,10 @@ export default function ForecastDrawer({ open, onClose, mode = "forecast", row, 
                           key={m.month}
                           className={`flex items-center justify-between px-4 py-2.5 text-sm ${i % 2 === 1 ? "bg-gray-50" : "bg-white"}`}
                         >
-                          <span className="text-gray-600">{m.month}</span>
+                          <span className="flex items-center gap-2 text-gray-600">
+                            {m.month}
+                            <SourceTag source={m.source} />
+                          </span>
                           <span className="font-mono font-semibold">{m.qty.toLocaleString("en-IN")}</span>
                         </div>
                       ))}

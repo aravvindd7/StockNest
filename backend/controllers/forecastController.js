@@ -1,6 +1,6 @@
 const ForecastPredictions = require("../models/ForecastPredictions");
 const mlServiceClient = require("../services/mlServiceClient");
-const { currentFinancialYearStart, forecastStartYear } = require("../utils/forecastTargets");
+const { currentFinancialYearStart } = require("../utils/forecastTargets");
 const { finYearLabel } = require("../utils/financialYear");
 
 /**
@@ -47,30 +47,36 @@ async function runBacktest(req, res) {
  * 18: "Do not retrain the model every time Planning Master is opened" —
  * this is the explicit trigger that stands in for a future scheduler).
  *
- * Phase B: generates the next 6 months of forecasts (H1-H6) anchored at
- * the FY following the current FY, derived from the server clock. Client
- * body params are accepted but ignored — the window is always computed
- * server-side for correctness.
+ * ROLLING WINDOW: generates the NEXT 6 months starting from the first
+ * month after the latest available actual Sales month (e.g. latest actual
+ * September 2026 → forecasts October 2026 … March 2027). The window is
+ * anchored to the DATA, not to a financial year — no FY anchor is passed
+ * to the ML service, which begins at the month after its last real data
+ * month and emits exactly `horizonMonths` consecutive months. The window
+ * rolls forward with time and may cross an FY boundary naturally; Planning
+ * Master maps each forecast month to its own FY.
  *
- * Calls the ML service, then upserts every Material+Plant+Month
- * prediction into ForecastPredictions — one document per period, so
- * re-generating overwrites the prior prediction for that exact period
- * rather than accumulating duplicates (see the model's unique index).
+ * Calls the ML service, then upserts every Material+Plant+Month prediction
+ * into ForecastPredictions — one document per period, so re-generating
+ * overwrites the prior prediction for that exact period rather than
+ * accumulating duplicates (see the model's unique index).
  *
- * Phase B cleanup: stale production forecasts from the previous 36-month
- * window (horizons 7-36) are deleted after the new 6-month generation, so
- * the collection never holds out-of-window/orphaned quarters that Planning
- * Master would otherwise render.
+ * Stale cleanup: after upserting the new window, any stored prediction
+ * OUTSIDE the active 6-month rolling window is deleted — a month that has
+ * since become actual (previously forecast month 1), and any leftover rows
+ * beyond the horizon, must not linger. Rows within the window are untouched
+ * (upsert overwrites them, keeping regeneration idempotent).
  */
 async function generateForecast(req, res) {
   try {
     const now = new Date();
     const currentFy = currentFinancialYearStart(now);
-    const startYear = forecastStartYear(currentFy); // FY start year of first forecast month
-    const startFinancialYear = finYearLabel(startYear); // e.g. "2027-28"
     const horizonMonths = 6; // Phase B: production horizon reduced from 36 to 6
 
-    const result = await mlServiceClient.requestForecast({ horizonMonths, startFinancialYear });
+    // No FY anchor is passed: the ML service anchors at the first month
+    // after the latest actual Sales month and emits exactly horizonMonths
+    // consecutive months (crossing an FY boundary naturally).
+    const result = await mlServiceClient.requestForecast({ horizonMonths });
 
     const generatedAt = new Date();
     const ops = result.forecasts.map((f) => ({
@@ -94,26 +100,36 @@ async function generateForecast(req, res) {
 
     if (ops.length > 0) await ForecastPredictions.bulkWrite(ops);
 
-    // Phase B: remove stale H7-H36 production forecasts left over from the
-    // previous 36-month generation. The 6-month window only produces
-    // horizons 1-6; anything beyond that is no longer generated and must not
-    // remain (Planning Master would otherwise show orphaned out-of-window
-    // quarters). Rows within the window are untouched — upsert overwrites them.
-    const stale = await ForecastPredictions.deleteMany({
-      monthsAheadInHorizon: { $gt: horizonMonths },
-    });
+    // Stale cleanup: remove any stored prediction outside the active rolling
+    // window. The window is the set of (financialYear, month) pairs just
+    // generated; anything else — a month that has since become actual, or a
+    // leftover row beyond the horizon — is no longer a forecast and is
+    // deleted. Within-window rows are preserved and overwritten by the
+    // upserts above (idempotent regeneration, unique key intact).
+    const windowMonths = [...new Set(result.forecasts.map((f) => `${f.financialYear}|${f.month}`))];
+    const stale = windowMonths.length
+      ? await ForecastPredictions.deleteMany({
+          $nor: windowMonths.map((pair) => {
+            const [fy, month] = pair.split("|");
+            return { financialYear: fy, month };
+          }),
+        })
+      : { deletedCount: 0 };
 
     const modelCounts = result.forecasts.reduce((acc, f) => {
       acc[f.model] = (acc[f.model] || 0) + 1;
       return acc;
     }, {});
 
+    const first = result.forecasts.find((f) => f.monthsAheadInHorizon === 1);
+    const last = result.forecasts.reduce((a, b) => (b.monthsAheadInHorizon > a.monthsAheadInHorizon ? b : a), result.forecasts[0]);
+
     res.json({
-      message: `Generated and stored ${ops.length} forecast predictions (${horizonMonths}-month horizon anchored at ${startFinancialYear}).`,
+      message: `Generated and stored ${ops.length} forecast predictions — the next ${horizonMonths} months from the latest actual Sales month.`,
       dataSource: result.dataSource,
       modelVersion: result.modelVersion,
       horizonMonths,
-      startFinancialYear,
+      forecastRange: first && last ? `${first.month} ${first.financialYear} → ${last.month} ${last.financialYear}` : null,
       currentFY: finYearLabel(currentFy),
       predictionsStored: ops.length,
       stalePredictionsRemoved: stale.deletedCount,

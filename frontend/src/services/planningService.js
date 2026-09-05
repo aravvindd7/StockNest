@@ -1,30 +1,26 @@
 import api from "./api";
 
 /**
- * The consolidated 3-slot FY comparison view — read-only, assembled fresh
- * from Material/Stock/Sales. Returns
- *   { currentFY, groups: [{index, viewYear, isForecastYear, hasData}], data: [...] }
+ * The fixed Active-FY operational timeline view — read-only, assembled fresh
+ * from Material/Stock/Sales/ForecastPredictions. Returns
+ *   { activeFY, activeMonth, activeQuarter, workingQuarter, previousFY,
+ *     hasForecastData, groups: [{index, viewYear, hasData}], data: [...] }
  * where each data row carries row-level attributes (safetyStock,
- * currentStock, trend, stockRisk, growthPct, confidence, inventoryDecision)
- * plus a per-FY `years` map keyed by FY start calendar year.
- *
- * `viewYears` is an array of 3 FY start years — the three independent,
- * user-selectable FY column slots. Omitted → backend defaults to
- * Previous | Current | Next-Forecast FY.
+ * currentStock, trend, stockRisk, growthPct, confidence, planDemand,
+ * requiredStock, inventoryDecision) plus a per-FY `years` map keyed by FY
+ * start calendar year. The three visible FY groups (Previous | Previous |
+ * Active) are always derived server-side from the clock — no client-side
+ * FY selection.
  */
-export async function fetchPlanningComparison({ search, viewYears, ...filterParams } = {}) {
-  const params = { ...filterParams };
-  if (search) params.search = search;
-  if (viewYears && viewYears.length) params.viewYears = viewYears.join(",");
+export async function fetchPlanningComparison(params = {}) {
   const { data } = await api.get("/planning", { params });
   return data;
 }
 
 /**
- * All selectable financial years — historical FYs from Sales Master plus
- * the current FY and the immediate next forecast FY — for the per-column-group
- * FY header filters. Returns { years: [{value, label, current?, forecast?}],
- * currentFY: {value, label} }.
+ * Selectable financial years — retained for backward compatibility.
+ * Planning Master no longer uses a FY selector: the timeline (Previous |
+ * Previous | Active) is fixed and rolls forward from the server clock.
  */
 export async function fetchPlanningYears() {
   const { data } = await api.get("/planning/years");
@@ -32,7 +28,7 @@ export async function fetchPlanningYears() {
 }
 
 /**
- * Admin-only: triggers the rolling 36-month forecast regeneration via
+ * Admin-only: triggers the rolling 6-month forecast regeneration via
  * the ML service. The backend derives the window anchor from the server
  * clock — no client-side params needed.
  */

@@ -9,11 +9,15 @@
  * Stock Master (current stock), and Sales Master (historical sales, the
  * foundation for every forecast).
  *
- * Rolling multi-year upgrade: the FY dropdown is now a pure view/filter
- * control. Selecting a year shows that year's Q1-Q4 + Total. Current/
- * historical FYs show actuals; future FYs show forecast data with a
- * "Forecasted Data — XGBoost" badge. The rolling 36-month forecast
- * window is always derived server-side (see utils/forecastTargets.js).
+ * Active-FY operational timeline: the view is a FIXED, date-derived window
+ * of three financial years — Previous FY | Previous FY | Active FY
+ * (e.g. 2024-25 | 2025-26 | 2026-27 ACTIVE). There is no permanent
+ * "Forecast Year" anymore. The Active FY is a MIXED year: months that have
+ * started show real Sales Master actuals, future months show the existing
+ * rolling XGBoost/WMA_FALLBACK predictions from ForecastPredictions where
+ * they exist — never fabricated. A PLAN column (current working quarter's
+ * demand) and a REQUIRED STOCK column (max(0, plan demand − current stock))
+ * sit next to it as the operational decision layer.
  */
 const Material = require("../models/Material");
 const Stock = require("../models/Stock");
@@ -21,54 +25,42 @@ const Sales = require("../models/Sales");
 const ForecastPredictions = require("../models/ForecastPredictions");
 const { computeSafetyStock } = require("../utils/safetyStock");
 const { buildInventoryDecision } = require("../utils/inventoryDecision");
-const { MONTHS_BY_QUARTER, finYearLabel, finYearStartCalendarYear } = require("../utils/financialYear");
-const { currentFinancialYearStart, buildYearOptions } = require("../utils/forecastTargets");
+const { MONTHS_BY_QUARTER, QUARTER_BY_MONTH, finYearLabel, finYearStartCalendarYear } = require("../utils/financialYear");
+const { currentFinancialYearStart } = require("../utils/forecastTargets");
 
 const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
+
+/** Calendar-order month names (Jan=0..Dec=11) — Document index 0 of getMonth(). */
+const CALENDAR_MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// ---------------------------------------------------------------------
-// Forecast Hierarchy: Historical Sales -> Monthly Forecast -> Quarter
-// Forecast -> Year Forecast. Quarter/Year are what the table displays;
-// Monthly is computed and retained on every forecast quarter (returned in
-// the API payload) specifically so a future Distribution Master can
-// consume it directly without this module needing to change.
-// ---------------------------------------------------------------------
-
 /**
- * Weighted moving average across a material's full sales history for one
- * specific quarter position (e.g. every Q2 the material has ever had),
- * weighted toward more recent years — this is the seasonal baseline.
+ * Calendar year a month belongs to within a financial year: April–December
+ * fall in the FY start year, January–March in the following calendar year.
+ * e.g. March of FY 2026-27 → 2027; September of FY 2026-27 → 2026.
  */
-function weightedSeasonalAverage(valuesChronological) {
-  if (valuesChronological.length === 0) return 0;
-  const weights = valuesChronological.map((_, i) => i + 1); // oldest=1 ... newest=N
-  const weightSum = weights.reduce((a, b) => a + b, 0);
-  const weighted = valuesChronological.reduce((sum, v, i) => sum + v * weights[i], 0);
-  return weighted / weightSum;
+function monthCalendarYear(monthName, fyStart) {
+  const ci = CALENDAR_MONTHS.indexOf(monthName);
+  return ci >= 3 /* April */ ? fyStart : fyStart + 1;
+}
+
+/** The 1st of a month within the active FY, as a Date — for "has this month started?" checks. */
+function monthStartDate(monthName, fyStart) {
+  const ci = CALENDAR_MONTHS.indexOf(monthName);
+  return new Date(monthCalendarYear(monthName, fyStart), ci, 1);
 }
 
 /**
- * Average year-over-year growth rate across a material's full yearly
- * sales totals, clamped to a sane range so a single volatile year can't
- * produce an unreasonable extrapolation.
+ * Confidence is higher when a quarter's historical values are consistent
+ * (low variance) year to year. Kept as the graceful fallback when a stored
+ * ForecastPredictions row predates the `confidence` field.
  */
-function computeTrendGrowthRate(yearlyTotalsChronological) {
-  const growthRates = [];
-  for (let i = 1; i < yearlyTotalsChronological.length; i += 1) {
-    const prev = yearlyTotalsChronological[i - 1];
-    const curr = yearlyTotalsChronological[i];
-    if (prev > 0) growthRates.push((curr - prev) / prev);
-  }
-  if (growthRates.length === 0) return 0;
-  const avg = growthRates.reduce((a, b) => a + b, 0) / growthRates.length;
-  return Math.max(-0.3, Math.min(0.5, avg)); // clamp to [-30%, +50%]
-}
-
-/** Confidence is higher when a quarter's historical values are consistent (low variance) year to year. */
 function computeConfidence(valuesChronological) {
   const nonZero = valuesChronological.filter((v) => v > 0);
   if (nonZero.length < 2) return 60; // not enough history to be confident
@@ -78,167 +70,6 @@ function computeConfidence(valuesChronological) {
   const coefficientOfVariation = mean > 0 ? stdDev / mean : 1;
   const confidence = Math.round(100 - coefficientOfVariation * 100);
   return Math.max(55, Math.min(97, confidence));
-}
-
-/** Splits a quarter's forecast total into 3 months with a mild within-quarter growth pattern, summing exactly to the quarter total. */
-function buildMonthlyBreakdown(quarter, quarterTotal) {
-  const months = MONTHS_BY_QUARTER[quarter];
-  const m1 = Math.round(quarterTotal * 0.3);
-  const m2 = Math.round(quarterTotal * 0.33);
-  const m3 = quarterTotal - m1 - m2; // remainder, so the three always sum exactly
-  return [
-    { month: months[0], qty: m1 },
-    { month: months[1], qty: m2 },
-    { month: months[2], qty: m3 },
-  ];
-}
-
-/**
- * Builds the full forecast block for one material using the WMA fallback
- * (when no ML predictions are available for a forecast year).
- */
-function buildForecast(materialSalesHistory, forecastYear) {
-  const historyYears = Object.keys(materialSalesHistory).map(Number).sort((a, b) => a - b);
-  const yearlyTotals = historyYears.map(
-    (y) => QUARTERS.reduce((sum, q) => sum + (materialSalesHistory[y]?.[q] || 0), 0)
-  );
-  const growthRate = computeTrendGrowthRate(yearlyTotals);
-  const growthPct = Math.round(growthRate * 100);
-
-  const quarters = {};
-  let total = 0;
-
-  QUARTERS.forEach((q) => {
-    const historicalForThisQuarter = historyYears.map((y) => materialSalesHistory[y]?.[q] || 0);
-    const baseline = weightedSeasonalAverage(historicalForThisQuarter);
-    const qty = Math.max(0, Math.round(baseline * (1 + growthRate)));
-    const confidence = computeConfidence(historicalForThisQuarter);
-
-    quarters[q] = {
-      qty,
-      confidence,
-      growthPct,
-      monthly: buildMonthlyBreakdown(q, qty),
-      reason:
-        historicalForThisQuarter.some((v) => v > 0)
-          ? `Forecast generated using ${historyYears.length} year(s) of historical sales trends and seasonal demand patterns for ${q}, reflecting a ${growthRate >= 0 ? "growing" : "declining"} year-over-year trend of ${Math.abs(growthPct)}%.`
-          : "No historical sales found for this material — forecast defaults to zero until sales history is available.",
-    };
-    total += qty;
-  });
-
-  const avgConfidence = Math.round(QUARTERS.reduce((sum, q) => sum + quarters[q].confidence, 0) / 4);
-
-  return { year: finYearLabel(forecastYear), quarters, total, avgConfidence, growthPct, source: "WMA" };
-}
-
-/**
- * PHASE 4: builds the identical forecast shape buildForecast() returns,
- * but sourced from persisted XGBoost/WMA_FALLBACK predictions
- * (ForecastPredictions) instead of computing them here.
- *
- * mlPredictionsForMaterial: ForecastPredictions docs for one materialNo,
- *   already filtered to the target financialYear (may span multiple
- *   plants — this function sums across all of them, same aggregation
- *   principle Sales Master's own Plant->Material rollup already uses).
- * materialSalesHistory / forecastYear: same inputs buildForecast takes —
- *   still used as a graceful-degradation fallback.
- */
-function buildForecastFromML(mlPredictionsForMaterial, materialSalesHistory, forecastYear) {
-  const historyYears = Object.keys(materialSalesHistory).map(Number).sort((a, b) => a - b);
-  const yearlyTotals = historyYears.map(
-    (y) => QUARTERS.reduce((sum, q) => sum + (materialSalesHistory[y]?.[q] || 0), 0)
-  );
-  const latestHistoricalTotal = yearlyTotals[yearlyTotals.length - 1] || 0;
-
-  const quarters = {};
-  let total = 0;
-  let anyXgboost = false;
-
-  QUARTERS.forEach((q) => {
-    const monthsInQuarter = MONTHS_BY_QUARTER[q];
-    const rowsForQuarter = mlPredictionsForMaterial.filter((p) => p.quarter === q);
-    anyXgboost = anyXgboost || rowsForQuarter.some((p) => p.model === "XGBoost");
-
-    const monthlyTotals = monthsInQuarter.map((month) => ({
-      month,
-      qty: Math.round(rowsForQuarter.filter((p) => p.month === month).reduce((s, p) => s + p.predictedSalesQty, 0)),
-    }));
-    const qty = monthlyTotals.reduce((s, m) => s + m.qty, 0);
-
-    // Confidence/reason: sourced from the stored, evidence-based values
-    // computed at forecast-generation time (ml-service/app/intelligence.py
-    // — real backtest WMAPE, real trend/seasonality detection, never an
-    // arbitrary percentage). Rows within the same quarter share the same
-    // material-level trend/seasonality/segmentWmape but differ slightly in
-    // confidence by month (horizon decay), so confidence is averaged
-    // across the quarter's available rows.
-    //
-    // GRACEFUL DEGRADATION: if a row predates this phase (no `confidence`
-    // stored) or the field is otherwise missing, fall back to the
-    // original historical-variance calculation — Part 9's explicit
-    // "a prediction is missing" case. This never throws and never shows a
-    // blank confidence value.
-    const rowsWithConfidence = rowsForQuarter.filter((p) => Number.isFinite(p.confidence));
-    const historicalForThisQuarter = historyYears.map((y) => materialSalesHistory[y]?.[q] || 0);
-
-    const confidence = rowsWithConfidence.length
-      ? Math.round(rowsWithConfidence.reduce((s, p) => s + p.confidence, 0) / rowsWithConfidence.length)
-      : computeConfidence(historicalForThisQuarter);
-    const confidenceTier = rowsWithConfidence.length ? rowsWithConfidence[rowsWithConfidence.length - 1].confidenceTier : null;
-    const segmentWmape = rowsWithConfidence.length ? rowsWithConfidence[0].segmentWmape : null;
-    const horizonAdjustedRows = rowsForQuarter.filter((p) => Number.isFinite(p.horizonAdjustedWmape));
-    const horizonAdjustedWmape = horizonAdjustedRows.length
-      ? Math.round((horizonAdjustedRows.reduce((s, p) => s + p.horizonAdjustedWmape, 0) / horizonAdjustedRows.length) * 100) / 100
-      : null;
-    const historyMonths = rowsWithConfidence.length ? rowsWithConfidence[0].historyMonths : null;
-    const trend = rowsWithConfidence.length ? rowsWithConfidence[0].trend : null;
-    const seasonality = rowsWithConfidence.length ? rowsWithConfidence[0].seasonality : null;
-    const seasonalityPeakQuarter = rowsWithConfidence.length ? rowsWithConfidence[0].seasonalityPeakQuarter : null;
-
-    // Rolling upgrade: horizon denominator from stored horizonMonths on
-    // any doc, falling back to max monthsAheadInHorizon across the
-    // quarter's rows, then to 12 for backward compatibility.
-    const horizonDenominator = rowsForQuarter.length
-      ? (rowsForQuarter[0].horizonMonths
-        || Math.max(...rowsForQuarter.map((p) => p.monthsAheadInHorizon || 0))
-        || 12)
-      : 12;
-    const monthsAheadRange = rowsForQuarter.length
-      ? [Math.min(...rowsForQuarter.map((p) => p.monthsAheadInHorizon || 0)), Math.max(...rowsForQuarter.map((p) => p.monthsAheadInHorizon || 0))]
-      : null;
-
-    const reason = rowsForQuarter.length
-      ? rowsWithConfidence.length
-        ? rowsWithConfidence[0].reason || "Forecast generated by the ML forecasting pipeline."
-        : `Forecast generated by ${anyXgboost ? "the XGBoost forecasting model" : "the WMA fallback"} (model version ${rowsForQuarter[0].modelVersion}), trained on this material's monthly sales history across ${new Set(rowsForQuarter.map((p) => p.plant)).size} plant(s).`
-      : "No stored ML prediction found for this quarter.";
-
-    quarters[q] = {
-      qty,
-      confidence,
-      confidenceTier,
-      segmentWmape,
-      horizonAdjustedWmape,
-      historyMonths,
-      trend,
-      seasonality,
-      seasonalityPeakQuarter,
-      forecastHorizon: monthsAheadRange ? `Month ${monthsAheadRange[0]}-${monthsAheadRange[1]} / ${horizonDenominator}` : null,
-      growthPct: latestHistoricalTotal > 0 ? Math.round(((qty - latestHistoricalTotal / 4) / (latestHistoricalTotal / 4)) * 100) : 0,
-      monthly: monthlyTotals,
-      reason,
-    };
-    total += qty;
-  });
-
-  const avgConfidence = Math.round(QUARTERS.reduce((sum, q) => sum + quarters[q].confidence, 0) / 4);
-  const growthPct = latestHistoricalTotal > 0 ? Math.round(((total - latestHistoricalTotal) / latestHistoricalTotal) * 100) : 0;
-
-  return {
-    year: finYearLabel(forecastYear), quarters, total, avgConfidence, growthPct,
-    source: anyXgboost ? "XGBoost" : "WMA_FALLBACK",
-  };
 }
 
 function computeOverallTrend(historicalTotal, forecastTotal) {
@@ -284,75 +115,131 @@ function applyPlanningFilters(data, filters = {}) {
 }
 
 /**
- * A forecast-year quarter block with nothing to show — used for a forecast
- * FY that lies beyond the generated horizon (e.g. FY 2028-29 when only a
- * 6-month window into 2027-28 has been generated). Deliberately EMPTY:
- * no WMA fabrication, no seasonal extrapolation, no invented numbers. The
- * frontend renders such a group as "No forecast data" instead of implying
- * a 36-month forecast exists.
+ * One quarter of the ACTIVE financial year — a hybrid of Sales Master
+ * actuals (months that have started) and ForecastPredictions (future
+ * months). Each month carries a `source`: "actual" | "forecast" | "none"
+ * (a future month with no stored prediction is deliberately "none"/0 —
+ * never fabricated). Forecast-intelligence fields are attached to the
+ * quarter only when forecast months exist, sourced from the stored
+ * evidence-based values (real backtest WMAPE, trend/seasonality), never
+ * invented here.
  */
-function emptyForecast(year) {
-  const quarters = {};
-  QUARTERS.forEach((q) => {
-    quarters[q] = {
-      qty: 0, confidence: null, confidenceTier: null, segmentWmape: null,
-      horizonAdjustedWmape: null, historyMonths: null, trend: null, seasonality: null,
-      seasonalityPeakQuarter: null, forecastHorizon: null, growthPct: null,
-      monthly: MONTHS_BY_QUARTER[q].map((month) => ({ month, qty: 0 })),
-      reason: null,
-    };
+function buildActiveQuarter({ quarter, monthlyActuals, forecastByMonth, activeFyStart, now, historicalForThisQuarter }) {
+  const months = MONTHS_BY_QUARTER[quarter];
+  const quarterForecastDocs = [];
+
+  const monthly = months.map((month) => {
+    // A month that has already started (including the current month, best
+    // available partial data) is an ACTUAL in Sales Master terms.
+    if (monthStartDate(month, activeFyStart) <= now) {
+      return { month, qty: monthlyActuals[month] || 0, source: "actual" };
+    }
+    const docs = forecastByMonth[month] || [];
+    docs.forEach((d) => quarterForecastDocs.push(d));
+    if (docs.length === 0) {
+      // Future month with no stored prediction — genuinely no data.
+      return { month, qty: 0, source: "none" };
+    }
+    return { month, qty: Math.round(docs.reduce((s, p) => s + (p.predictedSalesQty || 0), 0)), source: "forecast" };
   });
-  return { year, quarters, total: 0, avgConfidence: null, growthPct: null, source: "NO_DATA" };
+
+  const qty = monthly.reduce((s, m) => s + m.qty, 0);
+  const hasForecast = monthly.some((m) => m.source === "forecast");
+  const hasElapsed = monthly.some((m) => m.source === "actual");
+  const mode = hasForecast ? "forecast" : hasElapsed ? "actual" : "none";
+
+  const base = { qty, mode, monthly };
+  if (quarterForecastDocs.length === 0) return base;
+
+  const anyXgboost = quarterForecastDocs.some((p) => p.model === "XGBoost");
+  const rowsWithConfidence = quarterForecastDocs.filter((p) => Number.isFinite(p.confidence));
+  const confidence = rowsWithConfidence.length
+    ? Math.round(rowsWithConfidence.reduce((s, p) => s + p.confidence, 0) / rowsWithConfidence.length)
+    : computeConfidence(historicalForThisQuarter);
+  const confidenceTier = rowsWithConfidence.length ? rowsWithConfidence[rowsWithConfidence.length - 1].confidenceTier : null;
+  const segmentWmape = rowsWithConfidence.length ? rowsWithConfidence[0].segmentWmape : null;
+  const horizonAdjustedRows = quarterForecastDocs.filter((p) => Number.isFinite(p.horizonAdjustedWmape));
+  const horizonAdjustedWmape = horizonAdjustedRows.length
+    ? Math.round((horizonAdjustedRows.reduce((s, p) => s + p.horizonAdjustedWmape, 0) / horizonAdjustedRows.length) * 100) / 100
+    : null;
+  const historyMonths = rowsWithConfidence.length ? rowsWithConfidence[0].historyMonths : null;
+  const trend = rowsWithConfidence.length ? rowsWithConfidence[0].trend : null;
+  const seasonality = rowsWithConfidence.length ? rowsWithConfidence[0].seasonality : null;
+  const seasonalityPeakQuarter = rowsWithConfidence.length ? rowsWithConfidence[0].seasonalityPeakQuarter : null;
+
+  const horizonDenominator = quarterForecastDocs.length
+    ? (quarterForecastDocs[0].horizonMonths
+      || Math.max(...quarterForecastDocs.map((p) => p.monthsAheadInHorizon || 0))
+      || 12)
+    : 12;
+  const monthsAheadRange = quarterForecastDocs.length
+    ? [Math.min(...quarterForecastDocs.map((p) => p.monthsAheadInHorizon || 0)), Math.max(...quarterForecastDocs.map((p) => p.monthsAheadInHorizon || 0))]
+    : null;
+
+  const reason = rowsWithConfidence[0]?.reason || "Forecast generated by the ML forecasting pipeline.";
+
+  return {
+    ...base,
+    confidence,
+    confidenceTier,
+    segmentWmape,
+    horizonAdjustedWmape,
+    historyMonths,
+    trend,
+    seasonality,
+    seasonalityPeakQuarter,
+    forecastHorizon: monthsAheadRange ? `Month ${monthsAheadRange[0]}-${monthsAheadRange[1]} / ${horizonDenominator}` : null,
+    reason,
+    source: anyXgboost ? "XGBoost" : "WMA_FALLBACK",
+  };
 }
 
 /**
- * GET /api/planning's full payload — the 3-slot FY comparison.
+ * GET /api/planning's full payload — the fixed Active-FY operational
+ * timeline.
  *
- * Three INDEPENDENT, user-selectable FY column slots, passed as
- * `viewYears` (an array of FY start calendar years, comma-separated in the
- * query). Defaults to Previous | Current | Next-Forecast FY
- * (e.g. 2025-26 | 2026-27 | 2027-28). Any slot can be re-pointed at any
- * available financial year via that group's header filter — the window is
- * not fixed, only defaulted. The frontend can change any slot's FY without
- * touching the underlying forecast engine.
+ * Three FY column groups, derived entirely from the server clock:
+ * Previous FY | Previous FY | Active FY (2024-25 | 2025-26 | 2026-27
+ * ACTIVE today). The window rolls forward automatically when the calendar
+ * enters the next FY. Previous FYs are full Sales Master actuals; the
+ * Active FY is a per-month hybrid of actual + forecast (see
+ * buildActiveQuarter).
  *
  * Each row carries:
- *   - row-level attributes (safetyStock, currentStock, trend, stockRisk)
- *     that are FY-independent and drive the sticky columns + filters;
- *   - `years[fyStart]` per-FY blocks ({isForecastYear, quarters, total}
- *     for actuals, or {isForecastYear, forecast, total} for forecasts);
- *   - `growthPct`/`confidence`/`inventoryDecision` sourced from the
- *     forecast slot(s) — the nearest future forecast FY among the selected
- *     slots (the decision-relevant, in-horizon forecast) — null when no
- *     selected slot is a forecast year (NO_DATA).
- *
- * Actual-year quarters include a `monthly` array of real month-level
- * Sales actuals (Month 1/2/3) so the historical drill-down drawer has
- * genuine data — this is the one backend addition the drawer required.
+ *   - row-level attributes (safetyStock, currentStock, trend, stockRisk,
+ *     growthPct, confidence) that drive the sticky columns + filters;
+ *   - `years[fyStart]` per-FY blocks — previous FYs: actual quarters;
+ *     the Active FY: hybrid quarters ({qty, mode, monthly[source], ...});
+ *   - `planDemand` = the current working quarter's demand (actuals where
+ *     months have started, forecast for future months);
+ *   - `requiredStock` = max(0, planDemand − currentStock) — a simple,
+ *     immediate demand-gap metric that deliberately excludes Safety Stock
+ *     (that belongs to the separate Phase 7 replenishment/decision logic);
+ *   - `inventoryDecision[quarter]` = the Phase 7 decision per Active-FY
+ *     quarter (projected stock, replenishment qty, stock status) — kept
+ *     separate from Required Stock.
  *
  * Filters (trend/stockRisk/growthPct/confidence) are applied once across
  * the row set AFTER all FY blocks are built, so the same materials appear
  * in every FY group (a consistent row set, not three independently
  * filtered lists).
  */
-async function buildPlanningView({ search, trend, stockRisk, growthPct, confidence, viewYears } = {}) {
+async function buildPlanningView({ search, trend, stockRisk, growthPct, confidence } = {}) {
   const now = new Date();
-  const currentFyStart = currentFinancialYearStart(now);
+  const activeFyStart = currentFinancialYearStart(now);
+  const activeFyLabel = finYearLabel(activeFyStart);
+  const prevFy1 = activeFyStart - 1;
+  const prevFy2 = activeFyStart - 2;
+  const fyStarts = [prevFy2, prevFy1, activeFyStart];
 
-  // Three independent FY slots. Default: Previous | Current | Next-Forecast.
-  let fyStarts = (Array.isArray(viewYears) ? viewYears : [])
-    .map((y) => Number(y))
-    .filter((y) => Number.isFinite(y));
-  if (fyStarts.length === 0) {
-    fyStarts = [currentFyStart - 1, currentFyStart, currentFyStart + 1];
-  }
-  fyStarts = fyStarts.slice(0, 3);
-  const fyLabels = fyStarts.map(finYearLabel);
+  // Current operational period, derived from the clock — never hardcoded.
+  const activeMonth = CALENDAR_MONTHS[now.getMonth()] || "January";
+  const workingQuarter = QUARTER_BY_MONTH[activeMonth] || "Q1";
+  const coveredQuarters = QUARTERS.slice(0, QUARTERS.indexOf(workingQuarter) + 1);
 
   const groupMeta = fyStarts.map((y, i) => ({
     index: i,
-    viewYear: { value: y, label: finYearLabel(y), current: y === currentFyStart, forecast: y > currentFyStart },
-    isForecastYear: y > currentFyStart,
+    viewYear: { value: y, label: finYearLabel(y), active: y === activeFyStart },
   }));
 
   const materialQuery = { isActive: true };
@@ -364,14 +251,16 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
 
   // Stock: current totals per material. Sales: aggregated to Month level so
   // each actual quarter can carry both its total and a real monthly
-  // breakdown for the drill-down drawer. ML predictions: loaded once for
-  // all three FY labels in the window.
+  // breakdown for the drill-down drawer. ML predictions: loaded ONLY for
+  // the Active FY — future months within it come from ForecastPredictions;
+  // months that fall in the NEXT FY (a forecast crossing the FY boundary)
+  // are simply not presented, per the no-forecast-year rule.
   const [stockRows, salesRows, mlPredictionRows] = await Promise.all([
     Stock.find({}).select("MatNo TotalStockQty").lean(),
     Sales.aggregate([
       { $group: { _id: { MatNo: "$MatNo", FinancialYear: "$FinancialYear", Quarter: "$Quarter", Month: "$Month" }, qty: { $sum: "$SalesQty" } } },
     ]),
-    ForecastPredictions.find({ financialYear: { $in: fyLabels } }).lean(),
+    ForecastPredictions.find({ financialYear: activeFyLabel }).lean(),
   ]);
 
   const stockByMat = {};
@@ -401,12 +290,15 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     monthlyByMat[key][year][quarter][month] = (monthlyByMat[key][year][quarter][month] || 0) + qty;
   });
 
-  // ML predictions grouped by materialNo then financialYear label.
-  const mlByMaterialAndYear = {};
+  // ForecastPredictions grouped by materialNo -> month -> rows (summed
+  // across plants later, the same Plant->Material rollup Sales uses).
+  const forecastByMatMonth = {};
   mlPredictionRows.forEach((p) => {
-    if (!mlByMaterialAndYear[p.materialNo]) mlByMaterialAndYear[p.materialNo] = {};
-    if (!mlByMaterialAndYear[p.materialNo][p.financialYear]) mlByMaterialAndYear[p.materialNo][p.financialYear] = [];
-    mlByMaterialAndYear[p.materialNo][p.financialYear].push(p);
+    const key = String(p.materialNo || "").trim().toUpperCase();
+    if (!key) return;
+    if (!forecastByMatMonth[key]) forecastByMatMonth[key] = {};
+    if (!forecastByMatMonth[key][p.month]) forecastByMatMonth[key][p.month] = [];
+    forecastByMatMonth[key][p.month].push(p);
   });
 
   const data = materials.map((m) => {
@@ -414,6 +306,8 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     const currentStock = stockByMat[key] || 0;
     const materialSalesHistory = salesByMat[key] || {};
     const materialMonthly = monthlyByMat[key] || {};
+    const materialForecast = forecastByMatMonth[key] || {};
+    const historyYears = Object.keys(materialSalesHistory).map(Number).sort((a, b) => a - b);
 
     // Safety stock: computed from ALL quarterly history — FY-independent.
     const allQuarterValues = [];
@@ -422,61 +316,87 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     });
     const safetyStock = computeSafetyStock(allQuarterValues);
 
-    // Row-level trend from the CURRENT FY's actuals vs the prior FY.
-    const currentYearTotal = QUARTERS.reduce((s, q) => s + (materialSalesHistory[currentFyStart]?.[q] || 0), 0);
-    const priorYearTotal = QUARTERS.reduce((s, q) => s + (materialSalesHistory[currentFyStart - 1]?.[q] || 0), 0);
-    const trend = computeOverallTrend(priorYearTotal, currentYearTotal);
-    const stockRisk = computeStockRisk(currentStock, safetyStock);
-
     // Per-FY blocks keyed by FY start year.
     const years = {};
-    fyStarts.forEach((fyStart) => {
-      const isForecastYear = fyStart > currentFyStart;
-      if (!isForecastYear) {
-        const yearData = materialSalesHistory[fyStart] || { Q1: 0, Q2: 0, Q3: 0, Q4: 0 };
-        const monthData = materialMonthly[fyStart] || {};
-        const quarters = {};
-        QUARTERS.forEach((q) => {
-          const m = monthData[q] || {};
-          quarters[q] = {
-            qty: yearData[q],
-            monthly: MONTHS_BY_QUARTER[q].map((month) => ({ month, qty: m[month] || 0 })),
-          };
-        });
-        years[fyStart] = { isForecastYear, quarters, total: yearData.Q1 + yearData.Q2 + yearData.Q3 + yearData.Q4 };
-      } else {
-        const fyLabel = finYearLabel(fyStart);
-        const mlForMaterial = mlByMaterialAndYear[key]?.[fyLabel];
-        const forecast = mlForMaterial?.length
-          ? buildForecastFromML(mlForMaterial, materialSalesHistory, fyStart)
-          : emptyForecast(fyLabel); // no stored predictions -> genuinely no data, never fabricate
-        years[fyStart] = { isForecastYear, forecast, total: forecast.total };
-      }
+
+    // Previous FYs: pure Sales Master actuals.
+    [prevFy2, prevFy1].forEach((fyStart) => {
+      const yearData = materialSalesHistory[fyStart] || { Q1: 0, Q2: 0, Q3: 0, Q4: 0 };
+      const monthData = materialMonthly[fyStart] || {};
+      const quarters = {};
+      QUARTERS.forEach((q) => {
+        const m = monthData[q] || {};
+        quarters[q] = {
+          qty: yearData[q],
+          mode: "actual",
+          monthly: MONTHS_BY_QUARTER[q].map((month) => ({ month, qty: m[month] || 0, source: "actual" })),
+        };
+      });
+      years[fyStart] = { isForecastYear: false, quarters, total: yearData.Q1 + yearData.Q2 + yearData.Q3 + yearData.Q4 };
     });
 
-    // Row-level filter/sticky values + inventory decisions from the nearest
-    // future forecast FY among the selected slots (the in-horizon,
-    // decision-relevant forecast). Null when no selected slot is a forecast
-    // year — so historical-only slot arrangements show no confidence and no
-    // inventory decision.
-    const forecastFyStarts = fyStarts.filter((y) => y > currentFyStart);
-    const primaryForecastYear = forecastFyStarts.length ? Math.min(...forecastFyStarts) : null;
-    const firstForecast = primaryForecastYear != null ? years[primaryForecastYear]?.forecast : null;
-    const hasRealForecast = Boolean(firstForecast && firstForecast.source !== "NO_DATA");
-    const growthPct = hasRealForecast ? firstForecast.growthPct : null;
-    const confidence = hasRealForecast ? firstForecast.avgConfidence : null;
-
-    let inventoryDecision = null;
-    if (hasRealForecast) {
-      inventoryDecision = {};
-      QUARTERS.forEach((q) => {
-        inventoryDecision[q] = buildInventoryDecision({
-          currentStock,
-          safetyStock,
-          quarterForecast: firstForecast.quarters[q],
-        });
+    // Active FY: hybrid actual + forecast at month granularity.
+    const activeMonthData = materialMonthly[activeFyStart] || {};
+    const activeQuarters = {};
+    QUARTERS.forEach((q) => {
+      const historicalForThisQuarter = historyYears.map((y) => materialSalesHistory[y]?.[q] || 0);
+      activeQuarters[q] = buildActiveQuarter({
+        quarter: q,
+        monthlyActuals: activeMonthData[q] || {},
+        forecastByMonth: materialForecast,
+        activeFyStart,
+        now,
+        historicalForThisQuarter,
       });
-    }
+      // Like-for-like quarterly growth vs the same quarter of the prior FY.
+      const prevQty = materialSalesHistory[prevFy1]?.[q] || 0;
+      activeQuarters[q].growthPct = prevQty > 0 ? Math.round(((activeQuarters[q].qty - prevQty) / prevQty) * 100) : null;
+    });
+    const activeTotal = QUARTERS.reduce((s, q) => s + activeQuarters[q].qty, 0);
+    years[activeFyStart] = {
+      isForecastYear: false,
+      isActive: true,
+      workingQuarter,
+      quarters: activeQuarters,
+      total: activeTotal,
+    };
+
+    // Row-level trend/growth: like-for-like covered-period comparison
+    // (Q1..workingQuarter) against the same period last FY — comparing a
+    // partial Active FY against a full prior year would be misleading.
+    const activeCovered = coveredQuarters.reduce((s, q) => s + activeQuarters[q].qty, 0);
+    const prevYearData = materialSalesHistory[prevFy1] || { Q1: 0, Q2: 0, Q3: 0, Q4: 0 };
+    const prevCovered = coveredQuarters.reduce((s, q) => s + (prevYearData[q] || 0), 0);
+    const trend = computeOverallTrend(prevCovered, activeCovered);
+    const stockRisk = computeStockRisk(currentStock, safetyStock);
+    const growthPct = prevCovered > 0 ? Math.round(((activeCovered - prevCovered) / prevCovered) * 100) : null;
+
+    // Forecast confidence is only meaningful where forecast-backed months
+    // exist in the Active FY — null when there are none (never shown as if
+    // historical actuals had a forecast score).
+    const forecastDocConfidences = Object.values(materialForecast)
+      .flat()
+      .map((p) => p.confidence)
+      .filter((v) => Number.isFinite(v));
+    const confidence = forecastDocConfidences.length
+      ? Math.round(forecastDocConfidences.reduce((s, v) => s + v, 0) / forecastDocConfidences.length)
+      : null;
+
+    // PLAN = the current working quarter; REQUIRED STOCK = immediate demand
+    // gap (no safety stock, no replenishment formula — see inventoryDecision).
+    const planDemand = activeQuarters[workingQuarter].qty;
+    const requiredStock = Math.max(0, planDemand - currentStock);
+
+    // Phase 7 inventory decision per Active-FY quarter — kept separate from
+    // Required Stock.
+    const inventoryDecision = {};
+    QUARTERS.forEach((q) => {
+      inventoryDecision[q] = buildInventoryDecision({
+        currentStock,
+        safetyStock,
+        quarterForecast: { qty: activeQuarters[q].qty },
+      });
+    });
 
     return {
       materialNo: m.materialNo,
@@ -488,6 +408,9 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       stockRisk,
       growthPct,
       confidence,
+      planDemand,
+      requiredStock,
+      planQuarter: workingQuarter,
       inventoryDecision,
       years,
     };
@@ -500,28 +423,35 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     confidence,
   });
 
-  // Per-group "hasData": at least one row has a non-empty block for that FY
-  // (any real actual for current, or a real forecast source for forecast FYs).
+  // Per-group "hasData": at least one row has a non-empty block for that FY.
   const hasDataByFy = {};
   fyStarts.forEach((fyStart) => {
-    const isForecast = fyStart > currentFyStart;
-    hasDataByFy[fyStart] = filteredData.some((row) => {
-      const block = row.years[fyStart];
-      if (isForecast) return block.forecast.source !== "NO_DATA";
-      return block.total > 0;
-    });
+    hasDataByFy[fyStart] = filteredData.some((row) => row.years[fyStart]?.total > 0);
   });
 
+  // The Active FY holds any forecast month at all (unfiltered across
+  // materials) — drives whether the Forecast Confidence column renders.
+  const hasForecastData = Object.keys(forecastByMatMonth).length > 0;
+
   return {
-    currentFY: { value: currentFyStart, label: finYearLabel(currentFyStart) },
+    activeFY: { value: activeFyStart, label: activeFyLabel },
+    activeMonth,
+    activeQuarter: workingQuarter,
+    workingQuarter,
+    previousFY: [
+      { value: prevFy2, label: finYearLabel(prevFy2) },
+      { value: prevFy1, label: finYearLabel(prevFy1) },
+    ],
+    hasForecastData,
     groups: groupMeta.map((g) => ({ ...g, hasData: hasDataByFy[g.viewYear.value] })),
     data: filteredData,
   };
 }
 
 /**
- * Financial year options for the dropdown — includes historical years
- * from Sales Master, the current FY, and the immediate next forecast FY.
+ * Financial year options for a dropdown — historical years from Sales
+ * Master, the current FY, and the immediate next forecast FY. Retained for
+ * backward compatibility; the Active-FY timeline no longer consumes it.
  */
 async function getAvailableStartYears() {
   const now = new Date();
@@ -531,6 +461,7 @@ async function getAvailableStartYears() {
     .map((fy) => finYearStartCalendarYear(fy))
     .filter((y) => Number.isFinite(y) && y > 0);
 
+  const { buildYearOptions } = require("../utils/forecastTargets");
   const years = buildYearOptions({
     currentFyStart,
     financialYearsFromSales: startYears,

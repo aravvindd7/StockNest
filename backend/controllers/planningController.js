@@ -28,15 +28,15 @@ function readNumberFilter(query, key) {
 }
 
 /**
- * GET /api/planning — Admin only. Query params: search, viewYears
- * (comma-separated FY start years, e.g. "2025,2026,2027"), trend,
- * stockRisk, growthPct, confidence.
+ * GET /api/planning — Admin only. Query params: search, trend, stockRisk,
+ * growthPct, confidence.
  *
- * Returns the 3-slot FY comparison — three independent, user-selectable FY
- * column groups. Defaults (when viewYears is absent) to Previous | Current
- * | Next-Forecast FY. Thin HTTP layer — all aggregation and forecasting
- * logic lives in services/planningService.js. This controller never touches
- * Material, Stock, or Sales directly.
+ * Returns the fixed Active-FY operational timeline — Previous FY | Previous
+ * FY | Active FY, derived entirely from the server clock (rolls forward
+ * automatically). The Active FY is a per-month hybrid of actual + forecast;
+ * PLAN and REQUIRED STOCK sit alongside it. Thin HTTP layer — all
+ * aggregation and forecasting logic lives in services/planningService.js.
+ * This controller never touches Material, Stock, or Sales directly.
  */
 async function getPlanningData(req, res) {
   try {

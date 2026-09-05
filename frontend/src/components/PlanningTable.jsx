@@ -1,24 +1,21 @@
 /**
- * PlanningTable — 3-slot FY comparison view. Three independent FY column
- * groups side-by-side (Q1-Q4 + Total per group), one material per row.
+ * PlanningTable — fixed Active-FY operational timeline. Exactly three FY
+ * column groups: Previous FY | Previous FY | Active FY, derived from the
+ * server clock and shown in this order. Each group: Q1-Q4 + Total.
  *
- * Each FY column-group header carries its own dropdown/filter (spreadsheet
- * style) so the user can re-point that specific slot at any available
- * financial year — historical, current, or forecast. Selecting a year
- * re-requests that slot's real data; nothing is fabricated.
+ * The Active FY is a MIXED year — months that have started show real Sales
+ * Master actuals; future months show the rolling XGBoost forecast where
+ * stored. A future month with no stored prediction renders as a
+ * non-clickable "—" (no data, never fabricated).
  *
- * Actual FY groups (historical/current) show Sales Master actuals — quarter
- * cells are clickable to open the historical drill-down drawer (real
- * monthly sales).
- * Forecast FY groups show ML predictions — quarter cells are tinted and
- * clickable to open the ForecastDetailsDrawer.
+ * Two operational columns sit right after the Active FY group:
+ *   PLAN            — the current working quarter's demand; clickable → Plan Details
+ *   REQUIRED STOCK  — max(0, plan demand − current stock); excludes safety stock
  *
- * A FY group with no data renders clean empty cells with a "No data" tag —
- * never fabricated numbers, never an implied 36-month forecast.
- *
- * Sticky left: Material Number, Material Name.
- * Sticky right: Current Stock, Safety Stock, Trend. Forecast Confidence is
- * rendered next to Total inside each forecast FY's blue column group.
+ * Sticky left:  Material Number, Material Name.
+ * Sticky right: PLAN, REQUIRED STOCK, CURRENT STOCK, SAFETY STOCK,
+ *               TREND, FORECAST CONFIDENCE (confidence only rendered when
+ *               the Active FY actually holds forecast-backed data).
  */
 import { Fragment } from "react";
 
@@ -38,21 +35,16 @@ function TrendArrow({ direction }) {
 
 /**
  * Quarter-over-quarter trend within a single FY group. First quarter is
- * always null (nothing precedes it within the year).
+ * always null (nothing precedes it within the year). Works for both pure
+ * actual blocks and the Active FY's hybrid blocks — both expose `quarters`.
  */
-function buildGroupTrend(block, isForecastYear) {
+function buildGroupTrend(block) {
   const trend = {};
   QUARTERS.forEach((q, i) => {
     if (i === 0) { trend[q] = null; return; }
     const prevQ = QUARTERS[i - 1];
-    let prevVal, currVal;
-    if (isForecastYear) {
-      prevVal = block?.forecast?.quarters?.[prevQ]?.qty ?? 0;
-      currVal = block?.forecast?.quarters?.[q]?.qty ?? 0;
-    } else {
-      prevVal = block?.quarters?.[prevQ]?.qty ?? 0;
-      currVal = block?.quarters?.[q]?.qty ?? 0;
-    }
+    const prevVal = block?.quarters?.[prevQ]?.qty ?? 0;
+    const currVal = block?.quarters?.[q]?.qty ?? 0;
     trend[q] = currVal > prevVal ? "up" : currVal < prevVal ? "down" : "flat";
   });
   return trend;
@@ -65,15 +57,22 @@ const STICKY_LEFT = [
 
 // Trailing sticky-right block, listed left-to-right as they should appear.
 const STICKY_RIGHT = [
+  { key: "plan", label: "Plan", width: 100 },
+  { key: "requiredStock", label: "Required Stock", width: 120 },
   { key: "currentStock", label: "Current Stock", width: 110 },
-  { key: "safetyStock", label: "Safety Stock", width: 110 },
+  { key: "safetyStock", label: "Safety Stock", width: 100 },
   { key: "trend", label: "Trend", width: 80 },
+  { key: "confidence", label: "Forecast Confidence", width: 130 },
 ];
 
 const HEADER_ROW_H = 38; // px, both header rows are the same height
 
-export default function PlanningTable({ groups, rows, availableYears = [], onChangeYear, loading, onCellClick }) {
-  const renderedRight = STICKY_RIGHT;
+export default function PlanningTable({ groups, rows, loading, onCellClick, onPlanClick, workingQuarter, activeFY, hasForecastData }) {
+  // Forecast Confidence (sticky-right) is only rendered when the Active FY
+  // holds forecast-backed months — it never shows for a purely historical view.
+  const renderedRight = hasForecastData
+    ? STICKY_RIGHT
+    : STICKY_RIGHT.filter((c) => c.key !== "confidence");
 
   let leftOffset = 0;
   const leftOffsets = STICKY_LEFT.map((col) => {
@@ -89,24 +88,25 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
     return offset;
   }).reverse();
 
-  const totalCols = STICKY_LEFT.length
-    + groups.reduce((count, g) => count + QUARTERS.length + 1 + (g.isForecastYear ? 1 : 0), 0)
-    + renderedRight.length;
+  const totalCols = STICKY_LEFT.length + groups.length * (QUARTERS.length + 1) + renderedRight.length;
 
-  const yearHeaderClass = (g) =>
-    g.isForecastYear
+  const groupHeaderClass = (g) =>
+    g.viewYear.active
       ? "border-b border-l border-accent/40 bg-accent px-3 py-2 text-center font-display text-[13px] font-bold text-white"
       : "border-b border-l border-white/10 bg-navy-2 px-3 py-2 text-center font-display text-[13px] font-bold text-white";
 
   const quarterHeaderClass = (g) =>
-    g.isForecastYear
+    g.viewYear.active
       ? "border-b border-l border-accent/40 bg-accent/80 px-2.5 py-1.5 text-center text-[10.5px] font-semibold uppercase tracking-wide text-white"
       : "border-b border-l border-white/10 bg-navy px-2.5 py-1.5 text-center text-[10.5px] font-semibold uppercase tracking-wide text-[#C9D3EA]";
 
   const totalHeaderClass = (g) =>
-    g.isForecastYear
+    g.viewYear.active
       ? "border-b border-l border-accent/40 bg-accent px-3 py-1.5 text-center text-[10.5px] font-bold uppercase tracking-wide text-white"
       : "border-b border-l border-white/10 bg-gray-500 px-3 py-1.5 text-center text-[10.5px] font-bold uppercase tracking-wide text-white";
+
+  const trendText = (t) => (t === "up" ? "↗" : t === "down" ? "↘" : "→");
+  const trendClass = (t) => (t === "up" ? "text-healthy" : t === "down" ? "text-out" : "text-gray-400");
 
   return (
     <div className="sn-card overflow-hidden">
@@ -114,34 +114,27 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
         <div className="min-w-max overflow-x-auto">
           <table className="min-w-max border-separate border-spacing-0 text-left text-[12.5px]">
             <thead>
-              {/* Row 1: sticky-left labels + one FY header (with its own year
-                  filter) per slot + sticky-right labels */}
+              {/* Row 1: sticky-left labels + one FY header per slot + sticky-right labels */}
               <tr style={{ height: HEADER_ROW_H }}>
                 {STICKY_LEFT.map((col, i) => (
                   <th
                     key={col.key}
                     rowSpan={2}
                     style={{ position: "sticky", left: leftOffsets[i], top: 0, width: col.width, zIndex: 30 }}
-                    className="bg-navy px-3 text-[11px] font-semibold uppercase tracking-wide text-[#C9D3EA] align-middle border-b border-white/10"
+                    className="border-b border-white/10 bg-navy px-3 align-middle text-[11px] font-semibold uppercase tracking-wide text-[#C9D3EA]"
                   >
                     {col.label}
                   </th>
                 ))}
 
                 {groups.map((g) => (
-                  <th
-                    key={g.index}
-                    colSpan={QUARTERS.length + 1 + (g.isForecastYear ? 1 : 0)}
-                    style={{ position: "sticky", top: 0, zIndex: 20 }}
-                    className={yearHeaderClass(g)}
-                  >
+                  <th key={g.index} colSpan={5} style={{ position: "sticky", top: 0, zIndex: 20 }} className={groupHeaderClass(g)}>
                     <div className="flex items-center justify-center gap-1.5">
-                      <FYHeaderSelect group={g} availableYears={availableYears} onChangeYear={onChangeYear} />
-                      {g.viewYear.current && (
-                        <span className="text-[9.5px] font-semibold uppercase tracking-wide opacity-80">Current</span>
-                      )}
-                      {g.isForecastYear && !g.viewYear.current && (
-                        <span className="text-[9.5px] font-semibold uppercase tracking-wide opacity-80">Forecast</span>
+                      <span>{g.viewYear.label}</span>
+                      {g.viewYear.active && (
+                        <span className="rounded bg-white/20 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-wide">
+                          Active
+                        </span>
                       )}
                       {!g.hasData && (
                         <span className="rounded bg-white/20 px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-wide">No data</span>
@@ -155,9 +148,18 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
                     key={col.key}
                     rowSpan={2}
                     style={{ position: "sticky", right: rightOffsets[i], top: 0, width: col.width, zIndex: 30 }}
-                    className="border-b border-l border-white/10 bg-navy px-3 text-[10.5px] font-semibold uppercase tracking-wide text-[#C9D3EA] align-middle"
+                    className="border-b border-l border-white/10 bg-navy px-3 align-middle text-[10.5px] font-semibold uppercase tracking-wide text-[#C9D3EA]"
                   >
-                    {col.label}
+                    {col.key === "plan" ? (
+                      <div className="flex flex-col items-center leading-tight">
+                        <span>Plan</span>
+                        <span className="text-[9px] font-medium normal-case tracking-normal opacity-70">
+                          {workingQuarter} · {activeFY?.label}
+                        </span>
+                      </div>
+                    ) : (
+                      col.label
+                    )}
                   </th>
                 ))}
               </tr>
@@ -173,14 +175,6 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
                     <th style={{ position: "sticky", top: HEADER_ROW_H, zIndex: 20 }} className={totalHeaderClass(g)}>
                       Total
                     </th>
-                    {g.isForecastYear && (
-                      <th
-                        style={{ position: "sticky", top: HEADER_ROW_H, zIndex: 20 }}
-                        className="border-b border-l border-accent/40 bg-accent px-3 py-1.5 text-center text-[10.5px] font-bold uppercase tracking-wide text-white"
-                      >
-                        Forecast Confidence
-                      </th>
-                    )}
                   </Fragment>
                 ))}
               </tr>
@@ -222,20 +216,19 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
 
                       {groups.map((g) => {
                         const block = row.years?.[g.viewYear.value];
-                        if (g.isForecastYear) {
-                          const hasData = block?.forecast?.source !== "NO_DATA";
-                          const trend = buildGroupTrend(block, true);
-                          return (
-                            <Fragment key={g.index}>
-                              {QUARTERS.map((q) => {
-                                const cell = block?.forecast?.quarters?.[q];
-                                if (!hasData) {
-                                  return (
-                                    <td key={q} className="border-l border-gray-100 bg-gray-50/60 px-2.5 py-2.5 text-right font-mono text-gray-300">
-                                      —
-                                    </td>
-                                  );
-                                }
+                        const trend = buildGroupTrend(block);
+                        return (
+                          <Fragment key={g.index}>
+                            {QUARTERS.map((q) => {
+                              const cell = block?.quarters?.[q];
+                              if (!cell || cell.mode === "none") {
+                                return (
+                                  <td key={q} className="border-l border-gray-100 bg-gray-50/60 px-2.5 py-2.5 text-right font-mono text-gray-300">
+                                    —
+                                  </td>
+                                );
+                              }
+                              if (cell.mode === "forecast") {
                                 return (
                                   <td
                                     key={q}
@@ -243,28 +236,11 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
                                     className="cursor-pointer border-l border-accent/10 bg-accent/5 px-2.5 py-2.5 text-right font-mono transition hover:bg-accent/15"
                                     title="Click for forecast details"
                                   >
-                                    {num(cell?.qty)}
+                                    {num(cell.qty)}
                                     <TrendArrow direction={trend[q]} />
                                   </td>
                                 );
-                              })}
-                              <td className={`border-l px-3 py-2.5 text-right font-mono font-bold ${hasData ? "border-accent/10 bg-accent/10 text-primary" : "border-gray-100 bg-gray-100 text-gray-400"}`}>
-                                {num(block?.total ?? 0)}
-                              </td>
-                              <td className="border-l border-accent/10 bg-accent/10 px-3 py-2.5 text-center">
-                                <span className={`sn-badge ${hasData && block?.forecast?.avgConfidence != null ? "bg-white/80 text-accent" : "bg-white/40 text-white/70"}`}>
-                                  {hasData && block?.forecast?.avgConfidence != null ? `${block.forecast.avgConfidence}%` : "—"}
-                                </span>
-                              </td>
-                            </Fragment>
-                          );
-                        }
-                        // Actual (historical/current) FY slot: clickable for the drill-down drawer.
-                        const trend = buildGroupTrend(block, false);
-                        return (
-                          <Fragment key={g.index}>
-                            {QUARTERS.map((q) => {
-                              const qty = block?.quarters?.[q]?.qty ?? 0;
+                              }
                               return (
                                 <td
                                   key={q}
@@ -272,39 +248,61 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
                                   className="cursor-pointer border-l border-gray-100 px-2.5 py-2.5 text-right font-mono transition hover:bg-[#EAF2FF]"
                                   title="Click for actual monthly sales"
                                 >
-                                  {num(qty)}
+                                  {num(cell.qty)}
                                   <TrendArrow direction={trend[q]} />
                                 </td>
                               );
                             })}
-                            <td className="border-l border-gray-100 bg-gray-100 px-3 py-2.5 text-right font-mono font-bold">
+                            <td className={`border-l px-3 py-2.5 text-right font-mono font-bold ${g.viewYear.active ? "border-accent/10 bg-accent/10 text-primary" : "border-gray-100 bg-gray-100"}`}>
                               {num(block?.total ?? 0)}
                             </td>
                           </Fragment>
                         );
                       })}
 
-                      {/* Sticky-right summary block */}
+                      {/* Sticky-right operational block */}
                       <td
                         style={{ position: "sticky", right: rightOffsets[0], width: renderedRight[0].width, zIndex: 5 }}
-                        className="border-l border-gray-100 bg-healthy/10 px-3 py-2.5 text-right font-mono"
+                        onClick={() => onPlanClick?.(row)}
+                        className={`cursor-pointer border-l border-accent/15 bg-accent/10 px-3 py-2.5 text-right font-mono transition hover:bg-accent/20 ${rowBg}`}
+                        title="Open Plan Details"
+                      >
+                        {num(row.planDemand)}
+                      </td>
+                      <td
+                        style={{ position: "sticky", right: rightOffsets[1], width: renderedRight[1].width, zIndex: 5 }}
+                        className={`border-l border-gray-100 px-3 py-2.5 text-right font-mono font-semibold ${row.requiredStock > 0 ? "text-out" : "text-[#3B4666]"} ${rowBg} group-hover:bg-[#EAF2FF]`}
+                      >
+                        {num(row.requiredStock)}
+                      </td>
+                      <td
+                        style={{ position: "sticky", right: rightOffsets[2], width: renderedRight[2].width, zIndex: 5 }}
+                        className={`border-l border-gray-100 bg-healthy/10 px-3 py-2.5 text-right font-mono ${rowBg} group-hover:bg-[#EAF2FF]`}
                       >
                         {num(row.currentStock)}
                       </td>
                       <td
-                        style={{ position: "sticky", right: rightOffsets[1], width: renderedRight[1].width, zIndex: 5 }}
-                        className="border-l border-gray-100 bg-healthy/5 px-3 py-2.5 text-right font-mono"
+                        style={{ position: "sticky", right: rightOffsets[3], width: renderedRight[3].width, zIndex: 5 }}
+                        className={`border-l border-gray-100 px-3 py-2.5 text-right font-mono ${rowBg} group-hover:bg-[#EAF2FF]`}
                       >
                         {num(row.safetyStock)}
                       </td>
                       <td
-                        style={{ position: "sticky", right: rightOffsets[2], width: renderedRight[2].width, zIndex: 5 }}
+                        style={{ position: "sticky", right: rightOffsets[4], width: renderedRight[4].width, zIndex: 5 }}
                         className={`border-l border-gray-100 px-3 py-2.5 text-center ${rowBg} group-hover:bg-[#EAF2FF]`}
                       >
-                        <span className={`text-base font-bold ${row.trend === "up" ? "text-healthy" : row.trend === "down" ? "text-out" : "text-gray-400"}`}>
-                          {row.trend === "up" ? "↗" : row.trend === "down" ? "↘" : "→"}
-                        </span>
+                        <span className={`text-base font-bold ${trendClass(row.trend)}`}>{trendText(row.trend)}</span>
                       </td>
+                      {hasForecastData && (
+                        <td
+                          style={{ position: "sticky", right: rightOffsets[5], width: renderedRight[5].width, zIndex: 5 }}
+                          className={`border-l border-gray-100 px-3 py-2.5 text-center ${rowBg} group-hover:bg-[#EAF2FF]`}
+                        >
+                          <span className={`sn-badge ${row.confidence != null ? "bg-accent/10 text-accent" : "bg-gray-100 text-gray-300"}`}>
+                            {row.confidence != null ? `${row.confidence}%` : "—"}
+                          </span>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -313,35 +311,5 @@ export default function PlanningTable({ groups, rows, availableYears = [], onCha
         </div>
       </div>
     </div>
-  );
-}
-
-/**
- * The spreadsheet-style per-group FY filter — a compact dropdown that is
- * part of the FY column-group header itself. Lists every available
- * financial year; choosing one re-points this specific slot at that FY.
- */
-function FYHeaderSelect({ group, availableYears, onChangeYear }) {
-  const current = group.viewYear.value;
-  // Ensure the slot's current selection is always an available option even
-  // if it isn't in the canonical year list (defensive).
-  const options = availableYears.some((y) => y.value === current)
-    ? availableYears
-    : [{ value: current, label: group.viewYear.label }, ...availableYears];
-
-  return (
-    <select
-      className="max-w-[120px] cursor-pointer bg-transparent text-center font-display text-[13px] font-bold text-inherit outline-none"
-      value={current}
-      onChange={(e) => onChangeYear?.(group.index, Number(e.target.value))}
-      aria-label={`Financial year for column group ${group.index + 1}`}
-      title="Change this column's financial year"
-    >
-      {options.map((y) => (
-        <option key={y.value} value={y.value} className="text-[#1B2338]">
-          {y.label}
-        </option>
-      ))}
-    </select>
   );
 }
