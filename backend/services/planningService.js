@@ -18,6 +18,16 @@
  * they exist — never fabricated. A PLAN column (current working quarter's
  * demand) and a REQUIRED STOCK column (max(0, plan demand − current stock))
  * sit next to it as the operational decision layer.
+ *
+ * ROLLING HORIZON: the forecast covers the current quarter + the next 2
+ * quarters (a fixed system rule — no user-facing horizon selector). Each
+ * row carries a `planSeries`: the forward rolling time series from the
+ * working quarter through that horizon, with per-month `source: "actual" |
+ * "forecast" | "none"`. When the working quarter is Q3/Q4 the horizon
+ * crosses into the NEXT FY; those crossed months come from the next FY's
+ * ForecastPredictions and are rendered inside the planSeries — a forecast
+ * that crosses the FY boundary is part of the active rolling window, never
+ * a standalone forecast-year column.
  */
 const Material = require("../models/Material");
 const Stock = require("../models/Stock");
@@ -25,8 +35,9 @@ const Sales = require("../models/Sales");
 const ForecastPredictions = require("../models/ForecastPredictions");
 const { computeSafetyStock } = require("../utils/safetyStock");
 const { buildInventoryDecision } = require("../utils/inventoryDecision");
-const { MONTHS_BY_QUARTER, QUARTER_BY_MONTH, finYearLabel, finYearStartCalendarYear } = require("../utils/financialYear");
-const { currentFinancialYearStart } = require("../utils/forecastTargets");
+const { computeWeekCoverage } = require("../utils/weekCoverage");
+const { MONTHS_BY_QUARTER, QUARTER_BY_MONTH, ALL_MONTHS, finYearLabel, finYearStartCalendarYear } = require("../utils/financialYear");
+const { currentFinancialYearStart, planForecastEndMonth } = require("../utils/forecastTargets");
 
 const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
 
@@ -54,6 +65,73 @@ function monthCalendarYear(monthName, fyStart) {
 function monthStartDate(monthName, fyStart) {
   const ci = CALENDAR_MONTHS.indexOf(monthName);
   return new Date(monthCalendarYear(monthName, fyStart), ci, 1);
+}
+
+/** Global month index of a FY-start-year + calendar-month pair (year*12 + Indian-FY month index). */
+function fyGlobalMonthIndex(fyStart, monthName) {
+  const ci = ALL_MONTHS.indexOf(monthName); // Indian-FY order: Apr=0 … Mar=11
+  return fyStart * 12 + ci;
+}
+
+/** The last month of each quarter within the Indian FY (Jun=2, Sep=5, Dec=8, Mar=11 in ALL_MONTHS 0-based). */
+const LAST_MONTH_OF_QUARTER_INDEX = { Q1: 2, Q2: 5, Q3: 8, Q4: 11 };
+
+/**
+ * The forward "current quarter + next 2 quarters" rolling time series for a
+ * material — every month from the start of the working quarter through the
+ * end of (workingQuarter + 2), each with its FY, quarter, quantity and
+ * `source`.
+ *
+ * Actual-vs-forecast classification is DATA-DRIVEN, not calendar-driven:
+ *   - a month with a real Sales Master actual → ACTUAL (whatever its state);
+ *   - the CURRENT month with no posted actual → FORECAST (reuses the stored
+ *     rolling ForecastPredictions for that month — e.g. today, September has
+ *     no Sales row but the rolling forecast emits a September prediction, so
+ *     it reads FORECAST, never a fabricated "0 ACTUAL");
+ *   - a future month with a stored prediction → FORECAST;
+ *   - missing data/prediction → "none"/0, never fabricated.
+ * Crosses an FY boundary when the working quarter is Q3 or Q4 — e.g. Q4
+ * 2026-27 rolls into Q1/Q2 2027-28.
+ */
+function buildPlanSeries({ workingQuarter, activeFyStart, now, monthlyActualsByQuarter, forecastByMonth }) {
+  const wq = QUARTERS.indexOf(workingQuarter); // 0..3
+  const endQuarterIdx = (wq + 2) % 4;
+  const endQuarter = QUARTERS[endQuarterIdx];
+  const endMonth = ALL_MONTHS[LAST_MONTH_OF_QUARTER_INDEX[endQuarter]];
+  const endFyStart = activeFyStart + Math.floor((wq + 2) / 4);
+  const lastIdx = fyGlobalMonthIndex(endFyStart, endMonth);
+  const currentMonthName = CALENDAR_MONTHS[now.getMonth()];
+
+  const items = [];
+  let fy = activeFyStart;
+  for (let qi = wq; qi < wq + 3; qi = qi + 1) {
+    const quarterName = QUARTERS[qi % 4];
+    if (qi !== 0 && qi % 4 === 0) fy += 1; // crossed an FY boundary
+    MONTHS_BY_QUARTER[quarterName].forEach((month) => {
+      if (fyGlobalMonthIndex(fy, month) > lastIdx) return; // outside horizon
+      const quarterMap = monthlyActualsByQuarter[fy]?.[quarterName] || {};
+      const hasActualData = Object.prototype.hasOwnProperty.call(quarterMap, month);
+      if (hasActualData) {
+        items.push({ month, quarter: quarterName, financialYear: finYearLabel(fy), qty: quarterMap[month], source: "actual" });
+        return;
+      }
+      // No actual Sales row. A completed month is genuinely empty (NONE —
+      // never forecast a month that's already passed); a current/future month
+      // falls through to the stored rolling prediction (FORECAST) if one
+      // exists, else NONE.
+      if (monthStartDate(month, fy) <= now && month !== currentMonthName) {
+        items.push({ month, quarter: quarterName, financialYear: finYearLabel(fy), qty: 0, source: "none" });
+        return;
+      }
+      const docs = forecastByMonth[`${finYearLabel(fy)}|${month}`] || [];
+      items.push({
+        month, quarter: quarterName, financialYear: finYearLabel(fy),
+        qty: docs.length ? Math.round(docs.reduce((s, p) => s + (p.predictedSalesQty || 0), 0)) : 0,
+        source: docs.length ? "forecast" : "none",
+      });
+    });
+  }
+  return items;
 }
 
 /**
@@ -116,28 +194,42 @@ function applyPlanningFilters(data, filters = {}) {
 
 /**
  * One quarter of the ACTIVE financial year — a hybrid of Sales Master
- * actuals (months that have started) and ForecastPredictions (future
- * months). Each month carries a `source`: "actual" | "forecast" | "none"
- * (a future month with no stored prediction is deliberately "none"/0 —
- * never fabricated). Forecast-intelligence fields are attached to the
- * quarter only when forecast months exist, sourced from the stored
- * evidence-based values (real backtest WMAPE, trend/seasonality), never
- * invented here.
+ * actuals and ForecastPredictions. Each month carries a `source`: "actual" |
+ * "forecast" | "none".
+ *
+ * The actual-vs-forecast classification is DATA-DRIVEN, never calendar-only:
+ *   - a month with a real Sales Master actual → ACTUAL (completed, or the
+ *     current month where a value has already been posted);
+ *   - the CURRENT month with no posted actual → FORECAST — it reuses the
+ *     stored rolling ForecastPredictions for that month, so a September
+ *     prediction shows as FORECAST rather than a fabricated "0 ACTUAL";
+ *   - a future month with a stored prediction → FORECAST;
+ *   - missing data/prediction → "none"/0, never fabricated.
+ * Forecast-intelligence fields are attached to the quarter only when
+ * forecast months exist, sourced from the stored evidence-based values
+ * (real backtest WMAPE, trend/seasonality), never invented here.
  */
-function buildActiveQuarter({ quarter, monthlyActuals, forecastByMonth, activeFyStart, now, historicalForThisQuarter }) {
+function buildActiveQuarter({ quarter, monthlyActuals, forecastByMonth, activeFyStart, activeFyLabel, now, historicalForThisQuarter }) {
   const months = MONTHS_BY_QUARTER[quarter];
   const quarterForecastDocs = [];
+  const currentMonthName = CALENDAR_MONTHS[now.getMonth()];
 
   const monthly = months.map((month) => {
-    // A month that has already started (including the current month, best
-    // available partial data) is an ACTUAL in Sales Master terms.
-    if (monthStartDate(month, activeFyStart) <= now) {
-      return { month, qty: monthlyActuals[month] || 0, source: "actual" };
+    const hasActualData = Object.prototype.hasOwnProperty.call(monthlyActuals, month);
+    if (hasActualData) {
+      // Real Sales Master row — a completed month, or the current month with
+      // a posted (possibly partial) value.
+      return { month, qty: monthlyActuals[month], source: "actual" };
     }
-    const docs = forecastByMonth[month] || [];
+    // No actual Sales row. A completed month is genuinely empty (NONE); the
+    // current month (no data posted yet) and future months fall through to
+    // the stored rolling prediction — FORECAST when one exists, else NONE.
+    if (monthStartDate(month, activeFyStart) <= now && month !== currentMonthName) {
+      return { month, qty: 0, source: "none" };
+    }
+    const docs = forecastByMonth[`${activeFyLabel}|${month}`] || [];
     docs.forEach((d) => quarterForecastDocs.push(d));
     if (docs.length === 0) {
-      // Future month with no stored prediction — genuinely no data.
       return { month, qty: 0, source: "none" };
     }
     return { month, qty: Math.round(docs.reduce((s, p) => s + (p.predictedSalesQty || 0), 0)), source: "forecast" };
@@ -215,6 +307,11 @@ function buildActiveQuarter({ quarter, monthlyActuals, forecastByMonth, activeFy
  *   - `requiredStock` = max(0, planDemand − currentStock) — a simple,
  *     immediate demand-gap metric that deliberately excludes Safety Stock
  *     (that belongs to the separate Phase 7 replenishment/decision logic);
+ *   - `weekCoverage` = read-only inventory-health indicator — current stock
+ *     ÷ average weekly forecast demand, computed ONLY from the forecast
+ *     months of the row's own planSeries (utils/weekCoverage.js). It is
+ *     informational; it never derives Plan / Required Stock and never
+ *     modifies the inventory decision.
  *   - `inventoryDecision[quarter]` = the Phase 7 decision per Active-FY
  *     quarter (projected stock, replenishment qty, stock status) — kept
  *     separate from Required Stock.
@@ -251,16 +348,20 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
 
   // Stock: current totals per material. Sales: aggregated to Month level so
   // each actual quarter can carry both its total and a real monthly
-  // breakdown for the drill-down drawer. ML predictions: loaded ONLY for
-  // the Active FY — future months within it come from ForecastPredictions;
-  // months that fall in the NEXT FY (a forecast crossing the FY boundary)
-  // are simply not presented, per the no-forecast-year rule.
+  // breakdown for the drill-down drawer. ML predictions: loaded for the
+  // Active FY AND the next FY — future months within the Active FY come from
+  // ForecastPredictions, and when the "current quarter + next 2 quarters"
+  // horizon crosses into the next FY (working quarter Q3/Q4), those crossed
+  // months belong to the NEXT FY and are rendered in the forward planSeries
+  // (a forecast that crosses the FY boundary is presented — it is part of
+  // the active rolling window — not a standalone forecast year column).
+  const nextFyLabel = finYearLabel(activeFyStart + 1);
   const [stockRows, salesRows, mlPredictionRows] = await Promise.all([
     Stock.find({}).select("MatNo TotalStockQty").lean(),
     Sales.aggregate([
       { $group: { _id: { MatNo: "$MatNo", FinancialYear: "$FinancialYear", Quarter: "$Quarter", Month: "$Month" }, qty: { $sum: "$SalesQty" } } },
     ]),
-    ForecastPredictions.find({ financialYear: activeFyLabel }).lean(),
+    ForecastPredictions.find({ financialYear: { $in: [activeFyLabel, nextFyLabel] } }).lean(),
   ]);
 
   const stockByMat = {};
@@ -290,15 +391,19 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     monthlyByMat[key][year][quarter][month] = (monthlyByMat[key][year][quarter][month] || 0) + qty;
   });
 
-  // ForecastPredictions grouped by materialNo -> month -> rows (summed
-  // across plants later, the same Plant->Material rollup Sales uses).
+  // ForecastPredictions grouped by materialNo -> (financialYear|month) ->
+  // rows (summed across plants later, the same Plant->Material rollup Sales
+  // uses). Keyed by FY+month so Active-FY and crossed next-FY months both
+  // resolve — a forecast that crosses into the next FY is still part of the
+  // rolling horizon and must populate the forward planSeries.
   const forecastByMatMonth = {};
   mlPredictionRows.forEach((p) => {
     const key = String(p.materialNo || "").trim().toUpperCase();
     if (!key) return;
     if (!forecastByMatMonth[key]) forecastByMatMonth[key] = {};
-    if (!forecastByMatMonth[key][p.month]) forecastByMatMonth[key][p.month] = [];
-    forecastByMatMonth[key][p.month].push(p);
+    const monthKey = `${p.financialYear}|${p.month}`;
+    if (!forecastByMatMonth[key][monthKey]) forecastByMatMonth[key][monthKey] = [];
+    forecastByMatMonth[key][monthKey].push(p);
   });
 
   const data = materials.map((m) => {
@@ -329,7 +434,13 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
         quarters[q] = {
           qty: yearData[q],
           mode: "actual",
-          monthly: MONTHS_BY_QUARTER[q].map((month) => ({ month, qty: m[month] || 0, source: "actual" })),
+          // A historical month with a real Sales row is ACTUAL; one with no
+          // record is NONE (never a fabricated "0 ACTUAL").
+          monthly: MONTHS_BY_QUARTER[q].map((month) => ({
+            month,
+            qty: Object.prototype.hasOwnProperty.call(m, month) ? m[month] : 0,
+            source: Object.prototype.hasOwnProperty.call(m, month) ? "actual" : "none",
+          })),
         };
       });
       years[fyStart] = { isForecastYear: false, quarters, total: yearData.Q1 + yearData.Q2 + yearData.Q3 + yearData.Q4 };
@@ -345,6 +456,7 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
         monthlyActuals: activeMonthData[q] || {},
         forecastByMonth: materialForecast,
         activeFyStart,
+        activeFyLabel,
         now,
         historicalForThisQuarter,
       });
@@ -398,8 +510,31 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       });
     });
 
+    // The forward "current quarter + next 2 quarters" rolling time series —
+    // actual months (Sales Master) followed by forecast months (the same
+    // rolling forecast), crossing into the next FY when the horizon requires.
+    // This is what a Plan/working-quarter cell's drill-down renders.
+    const planSeries = buildPlanSeries({
+      workingQuarter,
+      activeFyStart,
+      now,
+      monthlyActualsByQuarter: materialMonthly,
+      forecastByMonth: materialForecast,
+    });
+
+    // Week Coverage — read-only inventory-health indicator. Consumes ONLY
+    // the FORECAST months of the existing active rolling forecast (planSeries
+    // excludes/de-duplicates actuals, so actual demand can never leak in and
+    // no month is double-counted). It never triggers an order and does not
+    // touch the Plan / Required Stock / Inventory Decision calculations.
+    const weekCoverage = computeWeekCoverage({
+      currentStock,
+      forecastMonths: planSeries.filter((m) => m.source === "forecast"),
+    });
+
     return {
       materialNo: m.materialNo,
+      planSeries,
       materialName: m.description,
       model: m.model,
       safetyStock,
@@ -410,6 +545,7 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       confidence,
       planDemand,
       requiredStock,
+      weekCoverage,
       planQuarter: workingQuarter,
       inventoryDecision,
       years,
@@ -473,4 +609,4 @@ async function getAvailableStartYears() {
   };
 }
 
-module.exports = { buildPlanningView, getAvailableStartYears, finYearLabel };
+module.exports = { buildPlanningView, buildPlanSeries, buildActiveQuarter, getAvailableStartYears, finYearLabel };

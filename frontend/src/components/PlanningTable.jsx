@@ -8,14 +8,19 @@
  * stored. A future month with no stored prediction renders as a
  * non-clickable "—" (no data, never fabricated).
  *
- * Two operational columns sit right after the Active FY group:
+ * The right-side operational block shares the Active FY's columns:
  *   PLAN            — the current working quarter's demand; clickable → Plan Details
+ *   CURRENT STOCK   — current inventory on hand
  *   REQUIRED STOCK  — max(0, plan demand − current stock); excludes safety stock
+ *   WEEK COVERAGE   — current stock ÷ average weekly forecast demand (read-only
+ *                     inventory-health indicator; consumes the forecast months of
+ *                     the active rolling forecast only). Placed AFTER Required
+ *                     Stock, never beside Current Stock.
  *
  * Sticky left:  Material Number, Material Name.
- * Sticky right: PLAN, REQUIRED STOCK, CURRENT STOCK, SAFETY STOCK,
- *               TREND, FORECAST CONFIDENCE (confidence only rendered when
- *               the Active FY actually holds forecast-backed data).
+ * Sticky right: PLAN, CURRENT STOCK, REQUIRED STOCK, WEEK COVERAGE,
+ *               SAFETY STOCK, TREND, FORECAST CONFIDENCE (confidence only
+ *               rendered when the Active FY actually holds forecast-backed data).
  */
 import { Fragment } from "react";
 
@@ -56,14 +61,51 @@ const STICKY_LEFT = [
 ];
 
 // Trailing sticky-right block, listed left-to-right as they should appear.
+// Week Coverage sits directly AFTER Required Stock (per spec) — it is an
+// informational inventory-health indicator, never merged into Required Stock.
 const STICKY_RIGHT = [
   { key: "plan", label: "Plan", width: 100 },
-  { key: "requiredStock", label: "Required Stock", width: 120 },
   { key: "currentStock", label: "Current Stock", width: 110 },
+  { key: "requiredStock", label: "Required Stock", width: 120 },
+  { key: "weekCoverage", label: "Week Coverage", width: 150 },
   { key: "safetyStock", label: "Safety Stock", width: 100 },
   { key: "trend", label: "Trend", width: 80 },
   { key: "confidence", label: "Forecast Confidence", width: 130 },
 ];
+
+const WEEK_STATUS_STYLE = {
+  CRITICAL: "bg-out/10 text-out",
+  HEALTHY: "bg-healthy/10 text-healthy",
+  HIGH: "bg-primary/10 text-primary",
+};
+
+const WEEK_STATUS_LABEL = { CRITICAL: "Critical", HEALTHY: "Healthy", HIGH: "High Stock" };
+
+// One-decimal weeks, but exactly 0 renders "0" (spec: "0 weeks · Critical").
+const formatWeeks = (w) => (w === 0 ? "0" : w.toFixed(1));
+
+/**
+ * Week Coverage cell — always shows text (never color alone), and the four
+ * safe N/A states come from the backend's `state` field (never NaN/undefined/
+ * Infinity). Computed states render an sn-badge tagged by status.
+ */
+function WeekCoverageCell({ wc }) {
+  if (!wc) return <span className="text-[10.5px] text-gray-400">N/A</span>;
+  if (wc.state === "invalid_stock") {
+    return <span className="text-[10.5px] text-gray-400">N/A</span>;
+  }
+  if (wc.state === "insufficient_forecast") {
+    return <span className="whitespace-nowrap text-[10px] text-gray-400">N/A · Insufficient Forecast</span>;
+  }
+  if (wc.state === "no_forecast_demand") {
+    return <span className="whitespace-nowrap text-[10px] text-gray-400">No forecast demand</span>;
+  }
+  return (
+    <span className={`whitespace-nowrap sn-badge ${WEEK_STATUS_STYLE[wc.status] || "bg-gray-100 text-gray-500"}`}>
+      {formatWeeks(wc.weeks)} weeks · {WEEK_STATUS_LABEL[wc.status] || wc.status}
+    </span>
+  );
+}
 
 const HEADER_ROW_H = 38; // px, both header rows are the same height
 
@@ -271,31 +313,39 @@ export default function PlanningTable({ groups, rows, loading, onCellClick, onPl
                       </td>
                       <td
                         style={{ position: "sticky", right: rightOffsets[1], width: renderedRight[1].width, zIndex: 5 }}
-                        className={`border-l border-gray-100 px-3 py-2.5 text-right font-mono font-semibold ${row.requiredStock > 0 ? "text-out" : "text-[#3B4666]"} ${rowBg} group-hover:bg-[#EAF2FF]`}
-                      >
-                        {num(row.requiredStock)}
-                      </td>
-                      <td
-                        style={{ position: "sticky", right: rightOffsets[2], width: renderedRight[2].width, zIndex: 5 }}
                         className={`border-l border-gray-100 bg-healthy/10 px-3 py-2.5 text-right font-mono ${rowBg} group-hover:bg-[#EAF2FF]`}
                       >
                         {num(row.currentStock)}
                       </td>
                       <td
+                        style={{ position: "sticky", right: rightOffsets[2], width: renderedRight[2].width, zIndex: 5 }}
+                        className={`border-l border-gray-100 px-3 py-2.5 text-right font-mono font-semibold ${row.requiredStock > 0 ? "text-out" : "text-[#3B4666]"} ${rowBg} group-hover:bg-[#EAF2FF]`}
+                      >
+                        {num(row.requiredStock)}
+                      </td>
+                      {/* WEEK COVERAGE — directly AFTER Required Stock (spec); sticky, z-index 5 (same layer as its right-side neighbors). */}
+                      <td
                         style={{ position: "sticky", right: rightOffsets[3], width: renderedRight[3].width, zIndex: 5 }}
+                        className={`border-l border-gray-100 px-2.5 py-2.5 text-right ${rowBg} group-hover:bg-[#EAF2FF]`}
+                        title="Weeks of cover from current stock against the active rolling forecast's weekly forecast demand"
+                      >
+                        <WeekCoverageCell wc={row.weekCoverage} />
+                      </td>
+                      <td
+                        style={{ position: "sticky", right: rightOffsets[4], width: renderedRight[4].width, zIndex: 5 }}
                         className={`border-l border-gray-100 px-3 py-2.5 text-right font-mono ${rowBg} group-hover:bg-[#EAF2FF]`}
                       >
                         {num(row.safetyStock)}
                       </td>
                       <td
-                        style={{ position: "sticky", right: rightOffsets[4], width: renderedRight[4].width, zIndex: 5 }}
+                        style={{ position: "sticky", right: rightOffsets[5], width: renderedRight[5].width, zIndex: 5 }}
                         className={`border-l border-gray-100 px-3 py-2.5 text-center ${rowBg} group-hover:bg-[#EAF2FF]`}
                       >
                         <span className={`text-base font-bold ${trendClass(row.trend)}`}>{trendText(row.trend)}</span>
                       </td>
                       {hasForecastData && (
                         <td
-                          style={{ position: "sticky", right: rightOffsets[5], width: renderedRight[5].width, zIndex: 5 }}
+                          style={{ position: "sticky", right: rightOffsets[6], width: renderedRight[6].width, zIndex: 5 }}
                           className={`border-l border-gray-100 px-3 py-2.5 text-center ${rowBg} group-hover:bg-[#EAF2FF]`}
                         >
                           <span className={`sn-badge ${row.confidence != null ? "bg-accent/10 text-accent" : "bg-gray-100 text-gray-300"}`}>
