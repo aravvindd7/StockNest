@@ -33,11 +33,15 @@ const Material = require("../models/Material");
 const Stock = require("../models/Stock");
 const Sales = require("../models/Sales");
 const ForecastPredictions = require("../models/ForecastPredictions");
+const ReplenishmentPlan = require("../models/ReplenishmentPlan");
 const { computeSafetyStock } = require("../utils/safetyStock");
 const { buildInventoryDecision } = require("../utils/inventoryDecision");
 const { computeWeekCoverage } = require("../utils/weekCoverage");
-const { MONTHS_BY_QUARTER, QUARTER_BY_MONTH, ALL_MONTHS, finYearLabel, finYearStartCalendarYear } = require("../utils/financialYear");
+const { computeAllocation, validateDistribution, WORKING_QUARTER_MONTHS } = require("../utils/replenishmentAllocation");
+const { predictReplenishment, resolveActivePlan } = require("../utils/replenishmentPrediction");
+const { MONTHS_BY_QUARTER, QUARTER_BY_MONTH, ALL_MONTHS, finYearLabel, finYearStartCalendarYear, deriveQuarter } = require("../utils/financialYear");
 const { currentFinancialYearStart, planForecastEndMonth } = require("../utils/forecastTargets");
+const { calendarQuarterOfDate, calendarQuarterMonths, fyStartForCalendarQuarter, computeCurrentQuarterMetrics } = require("../utils/currentQuarterSales");
 
 const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
 
@@ -312,6 +316,12 @@ function buildActiveQuarter({ quarter, monthlyActuals, forecastByMonth, activeFy
  *     months of the row's own planSeries (utils/weekCoverage.js). It is
  *     informational; it never derives Plan / Required Stock and never
  *     modifies the inventory decision.
+ *   - `replenishmentPlan` = planner-controlled Monthly Replenishment
+ *     Allocation — WHEN the Required Stock is replenished across the working
+ *     quarter's months. The planner's saved percentages are authoritative;
+ *     quantities are always recomputed (largest-remainder) from the CURRENT
+ *     requiredStock so they sum exactly to it. No saved allocation → the
+ *     temporary 33.33/33.33/33.34 default (saved: false).
  *   - `inventoryDecision[quarter]` = the Phase 7 decision per Active-FY
  *     quarter (projected stock, replenishment qty, stock status) — kept
  *     separate from Required Stock.
@@ -334,12 +344,27 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
   const workingQuarter = QUARTER_BY_MONTH[activeMonth] || "Q1";
   const coveredQuarters = QUARTERS.slice(0, QUARTERS.indexOf(workingQuarter) + 1);
 
+  // Current real-world CALENDAR quarter (Q1=Jan-Mar … Q4=Oct-Dec) — entirely
+  // separate from the working FY quarter above. The two "Q2 Sales" columns
+  // always track this calendar quarter regardless of which FY/quarter the
+  // user is viewing. A calendar quarter's months always fall inside one FY:
+  //   Q1 (Jan-Mar)  → previous FY (Jan 2026 → FY 2025-26)
+  //   Q2-Q4 (Apr-Dec) → the FY starting this calendar year (May 2026 → FY 2026-27)
+  const cqLabel = calendarQuarterOfDate(now);
+  const cqMonths = calendarQuarterMonths(cqLabel);
+  const cqFyStart = fyStartForCalendarQuarter(now);
+  const cqFyLabel = finYearLabel(cqFyStart);
+
   const groupMeta = fyStarts.map((y, i) => ({
     index: i,
     viewYear: { value: y, label: finYearLabel(y), active: y === activeFyStart },
   }));
 
-  const materialQuery = { isActive: true };
+  // Exclude BOTH soft-deactivated (isActive: false) AND discontinued
+  // (status: "Discontinued") materials — a discontinued material stays in
+  // Material Master for history/audit but must not appear in the operational
+  // planning timeline.
+  const materialQuery = { isActive: true, status: { $ne: "Discontinued" } };
   if (search) {
     const rx = { $regex: escapeRegex(search), $options: "i" };
     materialQuery.$or = [{ materialNo: rx }, { description: rx }, { model: rx }];
@@ -356,12 +381,13 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
   // (a forecast that crosses the FY boundary is presented — it is part of
   // the active rolling window — not a standalone forecast year column).
   const nextFyLabel = finYearLabel(activeFyStart + 1);
-  const [stockRows, salesRows, mlPredictionRows] = await Promise.all([
+  const [stockRows, salesRows, mlPredictionRows, replenishmentRows] = await Promise.all([
     Stock.find({}).select("MatNo TotalStockQty").lean(),
     Sales.aggregate([
       { $group: { _id: { MatNo: "$MatNo", FinancialYear: "$FinancialYear", Quarter: "$Quarter", Month: "$Month" }, qty: { $sum: "$SalesQty" } } },
     ]),
     ForecastPredictions.find({ financialYear: { $in: [activeFyLabel, nextFyLabel] } }).lean(),
+    ReplenishmentPlan.find({ financialYear: activeFyLabel, quarter: workingQuarter }).lean(),
   ]);
 
   const stockByMat = {};
@@ -404,6 +430,14 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     const monthKey = `${p.financialYear}|${p.month}`;
     if (!forecastByMatMonth[key][monthKey]) forecastByMatMonth[key][monthKey] = [];
     forecastByMatMonth[key][monthKey].push(p);
+  });
+
+  // Saved planner allocations for the working quarter — keyed by material.
+  const savedReplenishmentByMat = {};
+  replenishmentRows.forEach((r) => {
+    const key = String(r.materialNo || "").trim().toUpperCase();
+    if (!key) return;
+    savedReplenishmentByMat[key] = r;
   });
 
   const data = materials.map((m) => {
@@ -499,6 +533,26 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     const planDemand = activeQuarters[workingQuarter].qty;
     const requiredStock = Math.max(0, planDemand - currentStock);
 
+    // Current real-world calendar quarter Sales / Sales to Go — observability
+    // only. Purely in-memory over the maps already loaded above (no extra
+    // query): the current calendar quarter's months, resolved against
+    // month-granular Sales Master actuals and ForecastPredictions via
+    // utils/currentQuarterSales.js. Never feeds Plan / Required Stock /
+    // replenishment — see that util's header for the ACTUAL/FORECAST rule.
+    const cqMetrics = computeCurrentQuarterMetrics({
+      now,
+      actualForMonth: (month) => {
+        const monthActuals = materialMonthly[cqFyStart]?.[deriveQuarter(month)] || {};
+        return Object.prototype.hasOwnProperty.call(monthActuals, month) ? monthActuals[month] : null;
+      },
+      forecastForMonth: (month) => {
+        const rows = forecastByMatMonth[key]?.[`${cqFyLabel}|${month}`] || [];
+        return rows.length ? Math.round(rows.reduce((s, p) => s + (p.predictedSalesQty || 0), 0)) : null;
+      },
+    });
+    const currentQuarterSales = cqMetrics.sales;
+    const currentQuarterSalesToGo = cqMetrics.salesToGo;
+
     // Phase 7 inventory decision per Active-FY quarter — kept separate from
     // Required Stock.
     const inventoryDecision = {};
@@ -532,11 +586,46 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       forecastMonths: planSeries.filter((m) => m.source === "forecast"),
     });
 
+    // Monthly Replenishment Allocation — controls WHEN Required Stock is
+    // replenished across the working quarter's months. NOT demand
+    // distribution. Backend is the source of truth for the automatic
+    // prediction:
+    //
+    //   autoPlan — the current AUTO_FORECAST allocation, always recomputed
+    //   live from the XGBoost demand forecast + current inventory via a
+    //   stock-depletion simulation (utils/replenishmentPrediction.js). It
+    //   never goes stale when the rolling forecast regenerates. This is the
+    //   Reset target and the default when no manual plan is saved.
+    //
+    //   replenishmentPlan — the ACTIVE allocation. A saved MANUAL plan wins
+    //   (never auto-overwritten); otherwise the AUTO plan is active. A saved
+    //   plan's stored quantities are a historical snapshot, so the live view
+    //   ALWAYS recomputes quantities from the CURRENT requiredStock
+    //   (largest-remainder) — the sum is therefore always exactly current
+    //   requiredStock.
+    const autoPlan = predictReplenishment({
+      currentStock,
+      requiredStock,
+      quarter: workingQuarter,
+      monthly: activeQuarters[workingQuarter].monthly,
+      now,
+      activeFyStart,
+      financialYear: activeFyLabel,
+    });
+    const replenishmentPlan = resolveActivePlan({
+      savedPlan: savedReplenishmentByMat[key],
+      autoPlan,
+      requiredStock,
+      workingQuarter,
+    });
+
     return {
       materialNo: m.materialNo,
       planSeries,
       materialName: m.description,
       model: m.model,
+      currentQuarterSales,
+      currentQuarterSalesToGo,
       safetyStock,
       currentStock,
       trend,
@@ -546,6 +635,8 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       planDemand,
       requiredStock,
       weekCoverage,
+      replenishmentPlan,
+      autoReplenishmentPlan: autoPlan,
       planQuarter: workingQuarter,
       inventoryDecision,
       years,
@@ -574,6 +665,7 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     activeMonth,
     activeQuarter: workingQuarter,
     workingQuarter,
+    currentQuarter: { label: cqLabel },
     previousFY: [
       { value: prevFy2, label: finYearLabel(prevFy2) },
       { value: prevFy1, label: finYearLabel(prevFy1) },
@@ -609,4 +701,197 @@ async function getAvailableStartYears() {
   };
 }
 
-module.exports = { buildPlanningView, buildPlanSeries, buildActiveQuarter, getAvailableStartYears, finYearLabel };
+/**
+ * Save a planner-controlled replenishment allocation for a single material.
+ * Recalculates quantities from the supplied percentages using the largest-
+ * remainder algorithm, then upserts the ReplenishmentPlan document.
+ *
+ * @param {{materialNo, financialYear, quarter, requiredStock, distribution, depotId?, updatedBy?}} params
+ * @returns {object} The saved document.
+ */
+async function saveReplenishmentPlan({ materialNo, financialYear, quarter, requiredStock, distribution, depotId, updatedBy }) {
+  const calc = computeAllocation(requiredStock, distribution.map((d) => d.percentage));
+  const entries = distribution.map((d, i) => ({
+    month: d.month,
+    percentage: d.percentage,
+    quantity: calc[i],
+    source: d.source || "none",
+  }));
+  const v = validateDistribution(entries, requiredStock);
+  if (!v.valid) {
+    // Brand the error so the controller can return 400 (client input error)
+    // without string-matching on the message text.
+    const err = new Error(v.error);
+    err.validation = true;
+    throw err;
+  }
+
+  const filter = { materialNo, financialYear, quarter, depotId: depotId || "" };
+  const update = {
+    requiredStock,
+    distributionMode: "MANUAL",
+    distribution: entries,
+    updatedBy: updatedBy || "",
+  };
+  const doc = await ReplenishmentPlan.findOneAndUpdate(filter, update, { upsert: true, new: true, setDefaultsOnInsert: true }).lean();
+  return doc;
+}
+
+/**
+ * Load the saved replenishment allocation for a material. Returns null
+ * when no allocation exists (caller applies the default temporary state).
+ *
+ * @param {{materialNo, financialYear, quarter, depotId?}} params
+ * @returns {object|null}
+ */
+async function loadReplenishmentPlan({ materialNo, financialYear, quarter, depotId }) {
+  const doc = await ReplenishmentPlan.findOne({ materialNo, financialYear, quarter, depotId: depotId || "" }).lean();
+  return doc || null;
+}
+
+/**
+ * Reset a saved manual replenishment allocation — deletes the persisted
+ * ReplenishmentPlan document so the active plan resolves back to the live
+ * AUTO_FORECAST prediction (the backend's single source of truth). Idempotent:
+ * resetting a material with no saved override is a no-op success.
+ *
+ * @param {{materialNo, financialYear, quarter, depotId?}} params
+ * @returns {object} { reset: true, materialNo, financialYear, quarter }
+ */
+async function resetReplenishmentPlan({ materialNo, financialYear, quarter, depotId }) {
+  await ReplenishmentPlan.deleteOne({ materialNo, financialYear, quarter, depotId: depotId || "" });
+  return { reset: true, materialNo, financialYear, quarter };
+}
+
+/**
+ * Apply the given percentage distribution to ALL applicable materials for the
+ * current financial year and quarter. Backend is the source of truth: it
+ * resolves the scope (all active, non-discontinued materials), computes each
+ * material's requiredStock from live planDemand − currentStock, applies the
+ * percentages, validates, and persists each as a MANUAL plan.
+ *
+ * @param {{financialYear: string, distribution: Array<{month: string, percentage: number, source?: string}>, updatedBy?: string}} params
+ * @returns {{saved: number, affected: number, results: [{materialNo: string, status: string, error?: string, requiredStock?: number}]}}
+ */
+async function applyToAllReplenishmentPlan({ financialYear, distribution, updatedBy }) {
+  const results = [];
+  let savedCount = 0;
+
+  if (!Array.isArray(distribution) || distribution.length === 0) {
+    return { saved: 0, affected: 0, results: [{ materialNo: "N/A", status: "skipped", error: "distribution must be a non-empty array." }] };
+  }
+
+  // Backend resolves working quarter from the clock — never trusts the client.
+  const now = new Date();
+  const activeFyStart = currentFinancialYearStart(now);
+  const activeFyLabel = finYearLabel(activeFyStart);
+  const activeMonth = CALENDAR_MONTHS[now.getMonth()] || "January";
+  const workingQuarter = QUARTER_BY_MONTH[activeMonth] || "Q1";
+
+  // Load all active, non-discontinued materials (same scope as Planning Master).
+  const materials = await Material.find({ isActive: true, status: { $ne: "Discontinued" } }).sort("materialNo").lean();
+  if (materials.length === 0) {
+    return { saved: 0, affected: 0, results: [] };
+  }
+
+  // Load stock, sales, and forecast data in parallel.
+  const [stockRows, salesRows, mlPredictionRows] = await Promise.all([
+    Stock.find({}).select("MatNo TotalStockQty").lean(),
+    Sales.aggregate([
+      { $group: { _id: { MatNo: "$MatNo", FinancialYear: "$FinancialYear", Quarter: "$Quarter", Month: "$Month" }, qty: { $sum: "$SalesQty" } } },
+    ]),
+    ForecastPredictions.find({ financialYear: activeFyLabel }).lean(),
+  ]);
+
+  // Build lookup maps (same pattern as buildPlanningView).
+  const stockByMat = {};
+  stockRows.forEach((s) => {
+    const key = String(s.MatNo || "").trim().toUpperCase();
+    if (!key) return;
+    stockByMat[key] = (stockByMat[key] || 0) + (Number(s.TotalStockQty) || 0);
+  });
+
+  const monthlyByMat = {};
+  salesRows.forEach((s) => {
+    const key = String(s._id.MatNo || "").trim().toUpperCase();
+    const year = finYearStartCalendarYear(s._id.FinancialYear);
+    const quarter = s._id.Quarter;
+    const month = s._id.Month;
+    if (!key || year === null || !QUARTERS.includes(quarter) || !month) return;
+    if (!monthlyByMat[key]) monthlyByMat[key] = {};
+    if (!monthlyByMat[key][year]) monthlyByMat[key][year] = {};
+    if (!monthlyByMat[key][year][quarter]) monthlyByMat[key][year][quarter] = {};
+    monthlyByMat[key][year][quarter][month] = (monthlyByMat[key][year][quarter][month] || 0) + (Number(s.qty) || 0);
+  });
+
+  const forecastByMatMonth = {};
+  mlPredictionRows.forEach((p) => {
+    const key = String(p.materialNo || "").trim().toUpperCase();
+    if (!key) return;
+    if (!forecastByMatMonth[key]) forecastByMatMonth[key] = {};
+    const monthKey = `${p.financialYear}|${p.month}`;
+    if (!forecastByMatMonth[key][monthKey]) forecastByMatMonth[key][monthKey] = [];
+    forecastByMatMonth[key][monthKey].push(p);
+  });
+
+  // Source percentages from the drawer distribution.
+  const percentages = distribution.map((d) => d.percentage);
+  const monthNames = distribution.map((d) => d.month);
+
+  // Iterate through all applicable materials.
+  for (const m of materials) {
+    const key = m.materialNo;
+    const currentStock = stockByMat[key] || 0;
+
+    // Build the working quarter's monthly actuals + forecast for planDemand.
+    const activeMonthData = (monthlyByMat[key] || {})[activeFyStart] || {};
+    const materialForecast = forecastByMatMonth[key] || {};
+    const activeQuarterResult = buildActiveQuarter({
+      quarter: workingQuarter,
+      monthlyActuals: activeMonthData[workingQuarter] || {},
+      forecastByMonth: materialForecast,
+      activeFyStart,
+      activeFyLabel,
+      now,
+      historicalForThisQuarter: [],
+    });
+    const planDemand = activeQuarterResult.qty;
+    const requiredStock = Math.max(0, planDemand - currentStock);
+
+    // Apply distribution percentages to compute per-month quantities.
+    const quantities = computeAllocation(requiredStock, percentages);
+    const entries = monthNames.map((month, i) => ({
+      month,
+      percentage: percentages[i],
+      quantity: Number.isFinite(quantities[i]) ? quantities[i] : 0,
+      source: distribution[i]?.source || "none",
+    }));
+
+    // Validate the resulting distribution.
+    const v = validateDistribution(entries, requiredStock);
+    if (!v.valid) {
+      results.push({ materialNo: key, status: "skipped", error: v.error, requiredStock });
+      continue;
+    }
+
+    // Persist as a MANUAL plan.
+    try {
+      const filter = { materialNo: key, financialYear, quarter: workingQuarter, depotId: "" };
+      const update = {
+        requiredStock,
+        distributionMode: "MANUAL",
+        distribution: entries,
+        updatedBy: updatedBy || "",
+      };
+      await ReplenishmentPlan.findOneAndUpdate(filter, update, { upsert: true, new: true, setDefaultsOnInsert: true });
+      savedCount++;
+      results.push({ materialNo: key, status: "saved", requiredStock });
+    } catch (err) {
+      results.push({ materialNo: key, status: "error", error: err.message, requiredStock });
+    }
+  }
+
+  return { saved: savedCount, affected: results.length, results };
+}
+
+module.exports = { buildPlanningView, buildPlanSeries, buildActiveQuarter, getAvailableStartYears, finYearLabel, saveReplenishmentPlan, loadReplenishmentPlan, resetReplenishmentPlan, applyToAllReplenishmentPlan };

@@ -116,8 +116,11 @@ async function importSales(req, res) {
       return res.status(422).json({ message: "Import failed: missing required columns.", missingRequiredColumns: missing });
     }
 
+    // Discontinued materials stay in Material Master (history/audit) but are
+    // excluded from the valid set — new import rows can never be created for
+    // them, while existing historical sales rows are untouched.
     const validMaterialNos = new Set(
-      (await Material.find({ isActive: true }).select("materialNo").lean()).map((m) => m.materialNo)
+      (await Material.find({ isActive: true, status: { $ne: "Discontinued" } }).select("materialNo").lean()).map((m) => m.materialNo)
     );
 
     const errors = [];

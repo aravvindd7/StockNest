@@ -179,8 +179,18 @@ async function validateSalesInput(body) {
 
   if (!matNo) errors.push("Material Number is required.");
   else {
-    const exists = await Material.exists({ materialNo: matNo, isActive: true });
-    if (!exists) errors.push(`Material Number "${matNo}" does not exist in Material Master.`);
+    // Three distinct outcomes: not in Material Master at all, soft-deactivated,
+    // or discontinued. Each gets its own clear message. A discontinued material
+    // stays in Material Master for history/audit but can never receive new
+    // sales records.
+    const material = await Material.findOne({ materialNo: matNo });
+    if (!material) {
+      errors.push(`Material Number "${matNo}" does not exist in Material Master.`);
+    } else if (!material.isActive) {
+      errors.push(`Material Number "${matNo}" has been deactivated.`);
+    } else if (material.status === "Discontinued") {
+      errors.push(`Material Number "${matNo}" is discontinued and cannot receive new sales records.`);
+    }
   }
 
   if (!String(body.Material || "").trim()) errors.push("Material Name is required.");

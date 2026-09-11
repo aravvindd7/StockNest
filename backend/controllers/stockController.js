@@ -1,10 +1,32 @@
 const Stock = require("../models/Stock");
 const { STOCK_COLUMNS } = require("../models/Stock");
+const Material = require("../models/Material");
 const { buildXlsxBuffer } = require("../utils/xlsxExport");
 const { buildMongoFilter, buildSort, getDistinctValues } = require("../utils/queryFilterBuilder");
+const {
+  STOCK_STATUS_DISCONTINUED,
+  deriveStockStatus,
+  syncStockStatusesFromMaterials,
+} = require("../utils/stockStatusSync");
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Material numbers that are soft-deactivated (isActive: false) OR marked
+ * Discontinued in Material Master. Stock Master's Status field is kept in
+ * sync with this (see utils/stockStatusSync.js), so the default hide can
+ * filter on Status directly; this cross-reference is kept as a belt-and-
+ * suspenders safety net for any not-yet-migrated row. Material numbers are
+ * normalized (trim + uppercase) so Stock's MatNo matches Material's
+ * materialNo.
+ */
+async function getInactiveMaterialNos() {
+  const materials = await Material.find({ $or: [{ isActive: false }, { status: "Discontinued" }] })
+    .select("materialNo")
+    .lean();
+  return materials.map((m) => String(m.materialNo || "").trim().toUpperCase()).filter(Boolean);
 }
 
 const STOCK_SORTABLE_FIELDS = ["MatNo", "Material", "PlantName", "StockDate", "TotalStockQty", "StorageLocation"];
@@ -40,6 +62,17 @@ async function listStock(req, res) {
     }
     Object.assign(query, buildMongoFilter(req.query, STOCK_FILTER_CONFIG));
 
+    // Hide discontinued stock by default (only Active/Discontinued are valid
+    // visible statuses after sync); the showInactive=true override restores
+    // the full historical view. Status is the primary signal, with the
+    // Material cross-reference as a safety net for not-yet-migrated rows.
+    const showInactive = req.query.showInactive === "true";
+    if (!showInactive) {
+      query.Status = { $ne: STOCK_STATUS_DISCONTINUED };
+      const inactiveNos = await getInactiveMaterialNos();
+      if (inactiveNos.length > 0) query.MatNo = { $nin: inactiveNos };
+    }
+
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 50));
     const sort = req.query.sortBy ? buildSort(req.query, STOCK_SORTABLE_FIELDS, "StockDate") : { StockDate: -1, PlantName: 1 };
@@ -51,6 +84,7 @@ async function listStock(req, res) {
 
     res.json({
       data,
+      showInactive,
       pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.max(1, Math.ceil(total / limitNum)) },
     });
   } catch (err) {
@@ -104,11 +138,36 @@ async function createStock(req, res) {
     const errors = validateStockInput(body);
     if (errors.length) return res.status(400).json({ message: "Validation failed.", errors });
 
-    const stock = await Stock.create(buildStockPayload(body));
+    const payload = buildStockPayload(body);
+    // Status is always derived from Material Master when the material exists —
+    // any incoming Status value is ignored. STD → Active; Discontinued or
+    // inactive → Discontinued. Unknown materials keep whatever Status was
+    // supplied (nothing to derive from, never fabricated).
+    const matNo = String(body.MatNo || "").trim().toUpperCase();
+    const material = matNo ? await Material.findOne({ materialNo: matNo }).select("status isActive").lean() : null;
+    if (material) payload.Status = deriveStockStatus(material);
+
+    const stock = await Stock.create(payload);
     res.status(201).json({ stock });
   } catch (err) {
     console.error("[stockController.createStock]", err);
     res.status(500).json({ message: "Internal server error while creating the stock record." });
+  }
+}
+
+/**
+ * POST /api/stock/resync-status — Admin only. On-demand re-run of the
+ * Material Master → Stock Master status backfill (also run at startup). Safe
+ * and idempotent: only the Status field changes; quantities and all other
+ * columns are untouched.
+ */
+async function resyncStockStatuses(_req, res) {
+  try {
+    const result = await syncStockStatusesFromMaterials();
+    res.json({ message: "Stock Master statuses synchronized from Material Master.", ...result });
+  } catch (err) {
+    console.error("[stockController.resyncStockStatuses]", err);
+    res.status(500).json({ message: "Internal server error while resynchronizing stock statuses." });
   }
 }
 
@@ -123,6 +182,15 @@ async function exportStock(req, res) {
     }
     Object.assign(query, buildMongoFilter(req.query, STOCK_FILTER_CONFIG));
 
+    // Same discontinued-material exclusion as listStock, so the export matches
+    // exactly what the table shows (showInactive=true → full historical set).
+    const showInactive = req.query.showInactive === "true";
+    if (!showInactive) {
+      query.Status = { $ne: STOCK_STATUS_DISCONTINUED };
+      const inactiveNos = await getInactiveMaterialNos();
+      if (inactiveNos.length > 0) query.MatNo = { $nin: inactiveNos };
+    }
+
     const records = await Stock.find(query).sort({ StockDate: -1, PlantName: 1 }).lean();
     const buffer = buildXlsxBuffer(STOCK_COLUMNS, records);
 
@@ -135,4 +203,12 @@ async function exportStock(req, res) {
   }
 }
 
-module.exports = { listStock, getStockFilterValues, createStock, exportStock, buildStockPayload, validateStockInput };
+module.exports = {
+  listStock,
+  getStockFilterValues,
+  createStock,
+  exportStock,
+  resyncStockStatuses,
+  buildStockPayload,
+  validateStockInput,
+};

@@ -1,11 +1,11 @@
 const mongoose = require("mongoose");
 const Stock = require("../models/Stock");
 const { STOCK_COLUMNS } = require("../models/Stock");
-const Material = require("../models/Material");
 const DatasetHistory = require("../models/DatasetHistory");
 const { parseWorkbook, validateHeaders, normalizeRow } = require("../utils/excelParser");
 const { archiveSnapshot } = require("../utils/datasetHistoryHelper");
 const { buildMatchQuery } = require("../utils/stockMatcher");
+const { loadMaterialStatusMap } = require("../utils/stockStatusSync");
 
 const MODULE_KEY = "stock";
 const IMPORT_MODES = ["APPEND", "REPLACE"];
@@ -18,17 +18,21 @@ const REQUIRED_HEADERS = STOCK_COLUMNS.map((c) => ({ header: c.label, key: c.key
 /**
  * Validates one raw row. PlantName/MatNo/StockDate/StorageLocation are
  * required (they're also the matching key — Section 9); every other
- * field is optional and defaults sensibly. MatNo must also reference a
- * material that already exists in Material Master — Stock/Sales must
- * never invent new materials on import (data-consistency requirement:
- * every module references the same Material Master, which is the single
- * source of truth). There is no "duplicate within file" rejection here,
- * unlike Material/Depot — if the same file lists the same Plant/Mat/Date/
- * Location combination twice, the second row is expected to simply
- * overwrite the first when applied, which is reasonable default behavior
- * for a corrections-style stock feed rather than an error.
+ * field is optional and defaults sensibly. MatNo must reference a material
+ * that already exists in Material Master — Stock/Sales must never invent new
+ * materials on import (data-consistency requirement: every module references
+ * the same Material Master, which is the single source of truth).
+ *
+ * Status is ALWAYS derived from Material Master, never read from the file:
+ * STD → "Active"; Discontinued or inactive → "Discontinued". Any incoming
+ * Status value is ignored, and a discontinued material can never be flipped
+ * back to "Active" by an import. There is no "duplicate within file"
+ * rejection here, unlike Material/Depot — if the same file lists the same
+ * Plant/Mat/Date/Location combination twice, the second row is expected to
+ * simply overwrite the first when applied, which is reasonable default
+ * behavior for a corrections-style stock feed rather than an error.
  */
-function validateStockRow(rawRow, headerToKey, validMaterialNos) {
+function validateStockRow(rawRow, headerToKey, materialStatusMap) {
   const normalized = normalizeRow(rawRow, headerToKey);
   const errors = [];
 
@@ -39,7 +43,7 @@ function validateStockRow(rawRow, headerToKey, validMaterialNos) {
 
   if (!plantName) errors.push("PlantName is required.");
   if (!matNo) errors.push("MatNo is required.");
-  else if (!validMaterialNos.has(matNo)) errors.push(`MatNo "${matNo}" does not exist in Material Master.`);
+  else if (!materialStatusMap.has(matNo)) errors.push(`MatNo "${matNo}" does not exist in Material Master.`);
   if (!storageLocation) errors.push("StorageLocation is required.");
 
   let stockDate = null;
@@ -61,6 +65,11 @@ function validateStockRow(rawRow, headerToKey, validMaterialNos) {
     }
     if (key === "MatNo") {
       cleaned[key] = matNo;
+      return;
+    }
+    if (key === "Status") {
+      // Ignore the file's Status entirely — always derive from Material Master.
+      cleaned[key] = materialStatusMap.get(matNo) || "";
       return;
     }
     const raw = normalized[key];
@@ -107,15 +116,16 @@ async function importStock(req, res) {
       return res.status(422).json({ message: "Import failed: missing required columns.", missingRequiredColumns: missing });
     }
 
-    const validMaterialNos = new Set(
-      (await Material.find({ isActive: true }).select("materialNo").lean()).map((m) => m.materialNo)
-    );
+    // Status map over ALL materials (active and inactive alike). A row for a
+    // discontinued/inactive material imports fine but is always stamped
+    // "Discontinued" — an import can never flip it back to "Active".
+    const materialStatusMap = await loadMaterialStatusMap();
 
     const errors = [];
     const validRows = [];
 
     rows.forEach((rawRow, idx) => {
-      const result = validateStockRow(rawRow, headerToKey, validMaterialNos);
+      const result = validateStockRow(rawRow, headerToKey, materialStatusMap);
       const rowNumber = idx + 2;
       if (result.valid) validRows.push(result.cleaned);
       else errors.push({ row: rowNumber, materialNo: result.matchKey, error: result.errors.join(" ") });

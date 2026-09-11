@@ -12,7 +12,8 @@
     "seed:masterdata": "node seed/seedMasterData.js",
     "seed:inventory": "node seed/seedInventory.js",
     "seed:depots": "node seed/seedDepots.js",
-    "seed:all": "node seed/seedAll.js"
+    "seed:all": "node seed/seedAll.js",
+    "test": "node --test"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

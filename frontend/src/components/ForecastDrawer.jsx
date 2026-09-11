@@ -41,12 +41,26 @@ function SourceTag({ source }) {
   return null;
 }
 
-export default function ForecastDrawer({ open, onClose, mode = "forecast", row, quarter, yearLabel, cell, decision, source }) {
+export default function ForecastDrawer({ open, onClose, mode = "forecast", row, quarter, yearLabel, cell, decision, source, series }) {
   const isHistorical = mode === "historical";
+  // `series` is the rolling "current quarter + next 2 quarters" time series
+  // (per-month actual/forecast), passed for the working-quarter drill-down.
+  const hasSeries = mode === "forecast" && Array.isArray(series) && series.length > 0;
   const modelLabel = source ? MODEL_LABELS[source] || source : null;
-  const months = cell?.monthly || [];
+  const months = hasSeries ? series : cell?.monthly || [];
   const quarterTotal = months.reduce((s, m) => s + (m.qty || 0), 0);
   const monthlyAverage = months.length ? Math.round(quarterTotal / months.length) : 0;
+  const seriesRange =
+    hasSeries && series.length
+      ? `${series[0].quarter} ${series[0].financialYear} → ${series[series.length - 1].quarter} ${series[series.length - 1].financialYear}`
+      : null;
+  const title = hasSeries ? "Rolling Forecast" : isHistorical ? "Actual Sales" : "Forecast Details";
+  const badge =
+    hasSeries
+      ? "Actual + Forecast"
+      : isHistorical
+        ? "Actual / Historical"
+        : "Forecast";
 
   return (
     <>
@@ -63,15 +77,17 @@ export default function ForecastDrawer({ open, onClose, mode = "forecast", row, 
           <div className="flex h-full flex-col">
             <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
               <div>
-                <h3 className="font-display text-base font-bold">
-                  {isHistorical ? "Actual Sales" : "Forecast Details"}
-                </h3>
+                <h3 className="font-display text-base font-bold">{title}</h3>
                 <p className="text-xs text-gray-500">
                   {row.materialNo} · {row.materialName}
                 </p>
               </div>
               <div className="flex items-center gap-3">
-                {isHistorical ? (
+                {hasSeries ? (
+                  <span className="rounded-full bg-accent/15 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-accent">
+                    Actual + Forecast
+                  </span>
+                ) : isHistorical ? (
                   <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-500">
                     Actual / Historical
                   </span>
@@ -130,10 +146,23 @@ export default function ForecastDrawer({ open, onClose, mode = "forecast", row, 
               ) : (
                 <>
                   <div className="grid grid-cols-2 gap-4">
-                    <StatBlock label="Forecast Quantity" value={`${cell.qty.toLocaleString("en-IN")} Units`} accent />
-                    {Number.isFinite(cell.confidence) && <StatBlock label="Forecast Confidence" value={`${cell.confidence}%`} />}
-                    {Number.isFinite(cell.growthPct) && <StatBlock label="Growth" value={`${cell.growthPct >= 0 ? "+" : ""}${cell.growthPct}%`} tone={cell.growthPct >= 0 ? "up" : "down"} />}
-                    <StatBlock label="Quarter" value={`${quarter} · ${yearLabel}`} />
+                    <StatBlock
+                      label={hasSeries ? "Window Demand" : "Forecast Quantity"}
+                      value={`${(hasSeries ? quarterTotal : cell.qty).toLocaleString("en-IN")} Units`}
+                      accent
+                    />
+                    {hasSeries ? (
+                      <>
+                        <StatBlock label="Monthly Average" value={`${monthlyAverage.toLocaleString("en-IN")} Units`} />
+                        <StatBlock label="Rolling Window" value={seriesRange} />
+                      </>
+                    ) : (
+                      <>
+                        {Number.isFinite(cell.confidence) && <StatBlock label="Forecast Confidence" value={`${cell.confidence}%`} />}
+                        {Number.isFinite(cell.growthPct) && <StatBlock label="Growth" value={`${cell.growthPct >= 0 ? "+" : ""}${cell.growthPct}%`} tone={cell.growthPct >= 0 ? "up" : "down"} />}
+                        <StatBlock label="Quarter" value={`${quarter} · ${yearLabel}`} />
+                      </>
+                    )}
                   </div>
 
                   {(modelLabel || cell.confidenceTier || cell.segmentWmape != null || cell.forecastHorizon || cell.trend || cell.seasonality || cell.historyMonths != null) && (
@@ -178,15 +207,20 @@ export default function ForecastDrawer({ open, onClose, mode = "forecast", row, 
                   )}
 
                   <div className="mt-6">
-                    <h4 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Monthly Breakdown</h4>
+                    <h4 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                      {hasSeries ? "Rolling Forecast · Current Quarter + Next 2 Quarters" : "Monthly Breakdown"}
+                    </h4>
                     <div className="overflow-hidden rounded-lg border border-gray-200">
                       {months.map((m, i) => (
                         <div
-                          key={m.month}
+                          key={`${m.financialYear || yearLabel}-${m.month}`}
                           className={`flex items-center justify-between px-4 py-2.5 text-sm ${i % 2 === 1 ? "bg-gray-50" : "bg-white"}`}
                         >
                           <span className="flex items-center gap-2 text-gray-600">
                             {m.month}
+                            {hasSeries && m.financialYear && (
+                              <span className="text-[10px] text-gray-400">{m.financialYear}</span>
+                            )}
                             <SourceTag source={m.source} />
                           </span>
                           <span className="font-mono font-semibold">{m.qty.toLocaleString("en-IN")}</span>

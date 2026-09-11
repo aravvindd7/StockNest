@@ -58,4 +58,133 @@ async function getPlanningData(req, res) {
   }
 }
 
-module.exports = { getPlanningData, getAvailableStartYears };
+/**
+ * POST /api/planning/replenishment — Admin only.
+ * Save a planner-controlled replenishment allocation. Body:
+ *   { materialNo, financialYear, quarter, requiredStock, distribution: [{month, percentage, quantity, source}], depotId? }
+ *
+ * Recalculates quantities from percentages using the largest-remainder
+ * algorithm (server-side source of truth), validates the result, and
+ * upserts the ReplenishmentPlan document.
+ */
+async function saveReplenishmentPlan(req, res) {
+  try {
+    const { materialNo, financialYear, quarter, requiredStock, distribution, depotId } = req.body;
+
+    // Basic presence checks.
+    if (!materialNo || !financialYear || !quarter) {
+      return res.status(400).json({ message: "materialNo, financialYear, and quarter are required." });
+    }
+    if (!Array.isArray(distribution) || distribution.length === 0) {
+      return res.status(400).json({ message: "distribution must be a non-empty array." });
+    }
+    if (!Number.isFinite(requiredStock) || requiredStock < 0) {
+      return res.status(400).json({ message: "requiredStock must be a non-negative number." });
+    }
+
+    const saved = await planningService.saveReplenishmentPlan({
+      materialNo,
+      financialYear,
+      quarter,
+      requiredStock,
+      distribution,
+      depotId,
+      updatedBy: req.user?.username || "",
+    });
+    res.json(saved);
+  } catch (err) {
+    if (err.validation) {
+      return res.status(400).json({ message: err.message });
+    }
+    console.error("[planningController.saveReplenishmentPlan]", err);
+    res.status(500).json({ message: "Internal server error while saving replenishment allocation." });
+  }
+}
+
+/**
+ * GET /api/planning/replenishment — Admin only. Query params:
+ *   materialNo, financialYear, quarter, depotId? (optional)
+ *
+ * Returns the saved allocation document, or 404 when none exists.
+ */
+async function loadReplenishmentPlan(req, res) {
+  try {
+    const { materialNo, financialYear, quarter, depotId } = req.query;
+    if (!materialNo || !financialYear || !quarter) {
+      return res.status(400).json({ message: "materialNo, financialYear, and quarter are required." });
+    }
+    const doc = await planningService.loadReplenishmentPlan({ materialNo, financialYear, quarter, depotId });
+    if (!doc) {
+      return res.status(404).json({ message: "No saved replenishment allocation found." });
+    }
+    res.json(doc);
+  } catch (err) {
+    console.error("[planningController.loadReplenishmentPlan]", err);
+    res.status(500).json({ message: "Internal server error while loading replenishment allocation." });
+  }
+}
+
+/**
+ * POST /api/planning/replenishment/reset — Admin only.
+ * Discard a saved manual replenishment allocation for a material's working
+ * quarter. The persisted ReplenishmentPlan document is deleted, so on the next
+ * load the active plan resolves back to the live AUTO_FORECAST prediction.
+ * Body: { materialNo, financialYear, quarter, depotId? }
+ */
+async function resetReplenishmentPlan(req, res) {
+  try {
+    const { materialNo, financialYear, quarter, depotId } = req.body;
+    if (!materialNo || !financialYear || !quarter) {
+      return res.status(400).json({ message: "materialNo, financialYear, and quarter are required." });
+    }
+    const result = await planningService.resetReplenishmentPlan({ materialNo, financialYear, quarter, depotId });
+    res.json(result);
+  } catch (err) {
+    console.error("[planningController.resetReplenishmentPlan]", err);
+    res.status(500).json({ message: "Internal server error while resetting replenishment allocation." });
+  }
+}
+
+/**
+ * POST /api/planning/replenishment/apply-to-all — Admin only.
+ * Apply a percentage distribution to ALL applicable materials for the current
+ * financial year and quarter. Body:
+ *   { financialYear: string, distribution: [{month, percentage, source?}] }
+ *
+ * Backend resolves the scope (all active, non-discontinued materials),
+ * computes each material's requiredStock, applies percentages, validates,
+ * and persists each as a MANUAL plan.
+ * Returns { saved, affected, results: [{materialNo, status, error?}] }.
+ */
+async function applyToAllReplenishmentPlan(req, res) {
+  try {
+    const { financialYear, distribution } = req.body;
+    if (!financialYear) {
+      return res.status(400).json({ message: "financialYear is required." });
+    }
+    if (!Array.isArray(distribution) || distribution.length === 0) {
+      return res.status(400).json({ message: "distribution must be a non-empty array." });
+    }
+    // Validate each distribution entry before calling the service.
+    for (const entry of distribution) {
+      if (!entry.month || !Number.isFinite(entry.percentage) || entry.percentage < 0 || entry.percentage > 100) {
+        return res.status(400).json({ message: `Invalid distribution entry: ${JSON.stringify(entry)}.` });
+      }
+    }
+    const pctSum = distribution.reduce((s, d) => s + d.percentage, 0);
+    if (Math.abs(pctSum - 100) > 0.01) {
+      return res.status(400).json({ message: `Percentages sum to ${pctSum}%, expected 100%.` });
+    }
+    const result = await planningService.applyToAllReplenishmentPlan({
+      financialYear,
+      distribution,
+      updatedBy: req.user?.username || "",
+    });
+    res.json(result);
+  } catch (err) {
+    console.error("[planningController.applyToAllReplenishmentPlan]", err);
+    res.status(500).json({ message: "Internal server error while applying distribution to all materials." });
+  }
+}
+
+module.exports = { getPlanningData, getAvailableStartYears, saveReplenishmentPlan, loadReplenishmentPlan, resetReplenishmentPlan, applyToAllReplenishmentPlan };

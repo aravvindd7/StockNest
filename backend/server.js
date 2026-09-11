@@ -58,6 +58,23 @@ const PORT = process.env.PORT || 5001;
 
 async function start() {
   await connectDB();
+
+  // Startup backfill: synchronize every existing Stock record's Status to its
+  // Material Master status (STD → Active, Discontinued/inactive → Discontinued).
+  // Idempotent and non-destructive — only the Status field is written. Runs
+  // before the API serves so the table never shows a stale status; a failure
+  // is logged and the server still starts (statuses remain cross-reference-
+  // hidden, and the admin POST /api/stock/resync-status can retry).
+  try {
+    const { syncStockStatusesFromMaterials } = require("./utils/stockStatusSync");
+    const result = await syncStockStatusesFromMaterials();
+    console.log(
+      `[sync] Stock statuses backfilled from Material Master: +${result.updatedActive} Active, +${result.updatedDiscontinued} Discontinued`
+    );
+  } catch (err) {
+    console.error("[sync] Stock status backfill failed (continuing startup):", err.message);
+  }
+
   app.listen(PORT, () => {
     console.log(`[server] StockNest API running on http://localhost:${PORT}`);
   });

@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Material = require("../models/Material");
 const { buildXlsxBuffer } = require("../utils/xlsxExport");
 const { buildMongoFilter, getDistinctValues } = require("../utils/queryFilterBuilder");
+const { syncStockStatusForMaterial } = require("../utils/stockStatusSync");
 
 // Every visible Material Master column is filterable ("Filtering
 // Philosophy": if a user can see a column, they can filter it). Status/
@@ -165,6 +166,11 @@ async function createMaterial(req, res) {
       type: body.type,
     });
 
+    // Derive Stock Master Status for any existing Stock rows of this material
+    // (e.g. re-activating a previously soft-deleted material with historical
+    // stock) — Material Master remains the single source of truth.
+    await syncStockStatusForMaterial(materialNo);
+
     res.status(201).json({ material });
   } catch (err) {
     if (err.code === 11000) {
@@ -203,6 +209,9 @@ async function updateMaterial(req, res) {
     material.type = body.type;
 
     await material.save();
+    // Propagate the (possibly changed) status to every matching Stock row —
+    // STD → Active, Discontinued → Discontinued. materialNo is immutable.
+    await syncStockStatusForMaterial(material.materialNo);
     res.json({ material });
   } catch (err) {
     console.error("[materialController.updateMaterial]", err);
@@ -225,6 +234,9 @@ async function deleteMaterial(req, res) {
     }
     material.isActive = false;
     await material.save();
+    // Soft-delete never removes Stock rows; it marks every matching Stock row
+    // Discontinued so the historical stock stays visible under the audit view.
+    await syncStockStatusForMaterial(material.materialNo);
     res.json({ message: "Material deactivated.", materialId: material._id });
   } catch (err) {
     console.error("[materialController.deleteMaterial]", err);

@@ -36,12 +36,21 @@ export default function StockMaster() {
   const [error, setError] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
   const [successMessage, setSuccessMessage] = useState(null);
+  // Hide stock for deactivated/discontinued materials by default; toggling
+  // this restores the full historical view (passed to the backend, which is
+  // the source of truth for the exclusion).
+  const [showInactive, setShowInactive] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchStock({ ...filterState.queryParams, page, limit: pagination.limit });
+      const result = await fetchStock({
+        ...filterState.queryParams,
+        page,
+        limit: pagination.limit,
+        showInactive: showInactive || undefined,
+      });
       setRows(result.data);
       setPagination(result.pagination);
     } catch (err) {
@@ -50,7 +59,7 @@ export default function StockMaster() {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterState.queryParams, page]);
+  }, [filterState.queryParams, page, showInactive]);
 
   useEffect(() => {
     const t = setTimeout(load, 250);
@@ -123,6 +132,13 @@ export default function StockMaster() {
           <Link to="/stock-master/import-history" className="sn-btn-ghost">
             <HistoryIcon /> Import History
           </Link>
+          <button
+            onClick={() => { setShowInactive(!showInactive); setPage(1); }}
+            className={showInactive ? "sn-btn-ghost ring-1 ring-accent" : "sn-btn-ghost"}
+            title={showInactive ? "Hide stock for discontinued materials" : "Show stock for discontinued materials (audit/history view)"}
+          >
+            {showInactive ? "Hide Discontinued" : "Show Discontinued"}
+          </button>
         </div>
       </div>
 

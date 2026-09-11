@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import PlanningTable from "../components/PlanningTable";
 import ForecastDrawer from "../components/ForecastDrawer";
 import PlanDetailsDrawer from "../components/PlanDetailsDrawer";
+import ReplenishmentDetailsDrawer from "../components/ReplenishmentDetailsDrawer";
 import FilterManager from "../components/table/FilterManager";
 import { useTableFilters } from "../components/table/useTableFilters";
 import { fetchPlanningComparison, regenerateForecast } from "../services/planningService";
@@ -49,9 +50,10 @@ export default function PlanningMaster() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const [timeline, setTimeline] = useState(null); // { activeFY, workingQuarter, activeMonth, previousFY, hasForecastData }
+  const [timeline, setTimeline] = useState(null); // { activeFY, workingQuarter, activeMonth, previousFY, hasForecastData, currentQuarter }
   const [drawerTarget, setDrawerTarget] = useState(null); // { row, fyValue, quarter, mode } | null
-  const [planTarget, setPlanTarget] = useState(null); // row | null → Plan Details sidebar
+  const [planTarget, setPlanTarget] = useState(null); // row | null → Plan Details sidebar (read-only)
+  const [replenishTarget, setReplenishTarget] = useState(null); // row | null → Replenishment Details sidebar (editable)
   const [regenerating, setRegenerating] = useState(false);
 
   const load = useCallback(async () => {
@@ -67,6 +69,7 @@ export default function PlanningMaster() {
         activeMonth: result.activeMonth,
         previousFY: result.previousFY,
         hasForecastData: result.hasForecastData,
+        currentQuarter: result.currentQuarter,
       });
     } catch (err) {
       setError(err.response?.data?.message || "Could not load the planning view. Is the backend running?");
@@ -102,15 +105,36 @@ export default function PlanningMaster() {
   //   → the historical/actual drawer
   //   - "none" cells are never rendered clickable.
   // This keeps a purely historical quarter out of the Forecast branch.
+  //
+  // ONE exception: the WORKING quarter of the Active FY is the rolling-plan
+  // cell. Even though its own three months have all started (and so its cell
+  // mode is "actual"), it is the entry point to the rolling "current quarter
+  // + next 2 quarters" window — the row carries that forward time series
+  // (`row.planSeries`), so it opens the rolling-forecast drawer showing the
+  // ACTUAL months that have started followed by the FORECAST months of the
+  // same horizon.
   const handleCellClick = (row, fyValue, quarter) => {
     const block = row.years?.[fyValue];
     const cellMode = block?.quarters?.[quarter]?.mode;
     if (!cellMode || cellMode === "none") return;
+    if (fyValue === timeline?.activeFY?.value && quarter === timeline?.workingQuarter && row.planSeries?.length) {
+      setDrawerTarget({ row, fyValue, quarter, mode: "forecast" });
+      return;
+    }
     const mode = cellMode === "forecast" ? "forecast" : "historical";
     setDrawerTarget({ row, fyValue, quarter, mode });
   };
 
   const handlePlanClick = (row) => setPlanTarget(row);
+  const handleReplenishmentClick = (row) => setReplenishTarget(row);
+
+  // After a Monthly Replenishment Allocation is saved, the table's
+  // Replenishment Plan cell must reflect the persisted plan. We update the
+  // matching row in state (re-using the backend-returned plan, which includes
+  // the recomputed quantities) without a full reload.
+  const handleReplenishmentSaved = (materialNo, plan) => {
+    setRows((prev) => prev.map((r) => (r.materialNo === materialNo ? { ...r, replenishmentPlan: plan } : r)));
+  };
 
   // Resolve the drawer's payload from the clicked cell.
   const target = drawerTarget;
@@ -182,9 +206,11 @@ export default function PlanningMaster() {
           loading={loading}
           onCellClick={handleCellClick}
           onPlanClick={handlePlanClick}
+          onReplenishmentClick={handleReplenishmentClick}
           workingQuarter={timeline?.workingQuarter}
           activeFY={timeline?.activeFY}
           hasForecastData={Boolean(timeline?.hasForecastData)}
+          currentQuarter={timeline?.currentQuarter?.label}
         />
       )}
 
@@ -203,6 +229,7 @@ export default function PlanningMaster() {
         quarter={target?.quarter}
         yearLabel={targetGroup?.viewYear?.label}
         cell={targetCell}
+        series={target?.mode === "forecast" ? target?.row?.planSeries || null : null}
         decision={target?.mode === "forecast" ? target?.row?.inventoryDecision?.[target?.quarter] : null}
         source={target?.mode === "forecast" ? targetCell?.source : null}
       />
@@ -214,6 +241,16 @@ export default function PlanningMaster() {
         activeFY={timeline?.activeFY}
         workingQuarter={timeline?.workingQuarter}
         activeMonth={timeline?.activeMonth}
+      />
+
+      <ReplenishmentDetailsDrawer
+        open={Boolean(replenishTarget)}
+        onClose={() => setReplenishTarget(null)}
+        row={replenishTarget}
+        activeFY={timeline?.activeFY}
+        workingQuarter={timeline?.workingQuarter}
+        onSave={handleReplenishmentSaved}
+        onApplyAll={load}
       />
     </div>
   );

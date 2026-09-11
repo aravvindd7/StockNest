@@ -2,13 +2,16 @@ const express = require("express");
 const { requireAuth } = require("../middleware/authMiddleware");
 const { requireRole } = require("../middleware/roleMiddleware");
 const upload = require("../middleware/uploadMiddleware");
-const { listStock, getStockFilterValues, createStock, exportStock } = require("../controllers/stockController");
+const { listStock, getStockFilterValues, createStock, exportStock, resyncStockStatuses } = require("../controllers/stockController");
 const { importStock, getImportHistory, viewImportHistory, removeImportHistory } = require("../controllers/stockImportController");
 
 const router = express.Router();
 
 // Every route here is Admin-only, same pattern as materialRoutes.js/depotRoutes.js.
 router.use(requireAuth, requireRole("ADMIN"));
+
+// ---- On-demand Material → Stock status backfill (admin action) ----
+router.post("/resync-status", resyncStockStatuses);
 
 // ---- Import history (fixed paths before ":id") ----
 router.get("/import-history", getImportHistory);

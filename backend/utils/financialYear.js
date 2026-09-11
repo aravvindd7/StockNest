@@ -60,6 +60,17 @@ function derivePeriod(financialYear, month) {
   return `${financialYear}-${month}`;
 }
 
+/**
+ * Calendar year a month-name falls in for a given FY start year.
+ * April–December → fyStart; January–March → fyStart + 1.
+ * e.g. calendarYearOfMonth("September", 2026) → 2026
+ *      calendarYearOfMonth("March", 2026) → 2027
+ */
+function calendarYearOfMonth(month, fyStart) {
+  const ci = ALL_MONTHS.indexOf(month); // Indian-FY order: Apr=0 … Mar=11
+  return ci >= 9 /* January */ ? fyStart + 1 : fyStart;
+}
+
 module.exports = {
   MONTHS_BY_QUARTER,
   QUARTER_BY_MONTH,
@@ -71,4 +82,5 @@ module.exports = {
   isValidFinancialYear,
   finYearLabel,
   finYearStartCalendarYear,
+  calendarYearOfMonth,
 };

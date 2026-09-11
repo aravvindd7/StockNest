@@ -1,27 +1,21 @@
 /**
- * PlanDetailsDrawer — slide-out sidebar opened only from a PLAN cell in
- * Planning Master. Shows the working quarter's plan: the demand (actuals for
- * months that have started, forecast for future months), the required stock
- * (the immediate demand gap, excluding safety stock), and a monthly demand
- * distribution for the working quarter. The Phase 7 inventory/replenishment
- * decision is shown separately (labeled on its own) and is never merged into
- * Required Stock.
+ * PlanDetailsDrawer — slide-out sidebar opened from a PLAN cell in Planning
+ * Master. Read-only general planning overview for the working quarter: the
+ * demand (actuals for months that have started, forecast for future months),
+ * the required stock (the immediate demand gap, excluding safety stock), the
+ * monthly demand distribution, and the Phase 7 inventory/replenishment
+ * decision (shown separately, never merged into Required Stock).
  *
- * Percentages are monthly/quarter × 100, computed client-side with the last
- * row set as the remainder so the three always sum to exactly 100% (0% each
- * when the quarter total is 0) — never an arbitrary equal split.
+ * THIS DRAWER IS READ-ONLY. Monthly Replenishment Allocation editing lives
+ * EXCLUSIVELY in the ReplenishmentDetailsDrawer — from the PLAN drawer the
+ * planner can view but never edit allocation (no percentage inputs, no
+ * Generate / Reset / Save Allocation / Apply to All). Monthly Demand
+ * Distribution is rendered here and in the Replenishment drawer via the
+ * shared MonthlyDemandDistribution component — one implementation, reused.
  */
-const num = (n) => Number(n ?? 0).toLocaleString("en-IN");
+import MonthlyDemandDistribution from "./MonthlyDemandDistribution";
 
-function SourceTag({ source }) {
-  if (source === "actual") {
-    return <span className="rounded bg-healthy/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-healthy">Actual</span>;
-  }
-  if (source === "forecast") {
-    return <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent">Forecast</span>;
-  }
-  return null;
-}
+const num = (n) => Number(n ?? 0).toLocaleString("en-IN");
 
 const DECISION_STATUS_COLOR = {
   CRITICAL: "text-out",
@@ -35,25 +29,7 @@ export default function PlanDetailsDrawer({ open, onClose, row, activeFY, workin
   const quarterBlock = row?.years?.[fyValue]?.quarters?.[workingQuarter];
   const monthly = quarterBlock?.monthly || [];
   const quarterDemand = row?.planDemand ?? 0;
-
-  // Distribution percentages = monthly/quarter × 100. The last row is set as
-  // the remainder so the three always sum to exactly 100 (0 each when the
-  // total is 0).
-  const distribution = monthly.map((m) => ({
-    month: m.month,
-    qty: m.qty,
-    source: m.source,
-  }));
-  if (quarterDemand > 0) {
-    for (let i = 0; i < distribution.length; i++) {
-      distribution[i].pct =
-        i === distribution.length - 1
-          ? Math.max(0, 100 - distribution.slice(0, i).reduce((s, d) => s + Math.round((d.qty / quarterDemand) * 100), 0))
-          : Math.round((distribution[i].qty / quarterDemand) * 100);
-    }
-  } else {
-    distribution.forEach((d) => (d.pct = 0));
-  }
+  const requiredStock = row?.requiredStock ?? 0;
 
   const decision = row?.inventoryDecision?.[workingQuarter];
 
@@ -98,38 +74,10 @@ export default function PlanDetailsDrawer({ open, onClose, row, activeFY, workin
                 <StatBlock label="Material Name" value={row.materialName} />
                 <StatBlock label="Current Stock" value={`${num(row.currentStock)} Units`} />
                 <StatBlock label="Quarter Demand / Forecast" value={`${num(quarterDemand)} Units`} accent />
-                <StatBlock label="Required Stock" value={`${num(row.requiredStock)} Units`} warn={row.requiredStock > 0} />
+                <StatBlock label="Required Stock" value={`${num(requiredStock)} Units`} warn={requiredStock > 0} />
               </div>
 
-              <div className="mt-6">
-                <h4 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-                  Monthly Demand Distribution · {workingQuarter}
-                </h4>
-                <div className="overflow-hidden rounded-lg border border-gray-200">
-                  <div className="grid grid-cols-[1fr_auto_auto] gap-2 border-b border-gray-100 bg-gray-50 px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
-                    <span>Month</span>
-                    <span className="text-right">Demand</span>
-                    <span className="w-14 text-right">%</span>
-                  </div>
-                  {distribution.map((d, i) => (
-                    <div
-                      key={d.month}
-                      className={`grid grid-cols-[1fr_auto_auto] items-center gap-2 px-4 py-2.5 text-sm ${i % 2 === 1 ? "bg-gray-50" : "bg-white"}`}
-                    >
-                      <span className="flex items-center gap-2 text-gray-600">
-                        {d.month}
-                        <SourceTag source={d.source} />
-                      </span>
-                      <span className="font-mono font-semibold">{num(d.qty)}</span>
-                      <span className="w-14 text-right font-mono font-semibold text-gray-500">{d.pct}%</span>
-                    </div>
-                  ))}
-                  <div className="flex items-center justify-between border-t border-gray-100 bg-gray-50 px-4 py-2.5 text-sm font-semibold">
-                    <span className="text-gray-600">Quarter Total</span>
-                    <span className="font-mono font-bold">{num(quarterDemand)} · 100%</span>
-                  </div>
-                </div>
-              </div>
+              <MonthlyDemandDistribution monthly={monthly} quarterDemand={quarterDemand} workingQuarter={workingQuarter} />
 
               {decision && (
                 <div className="mt-6">
