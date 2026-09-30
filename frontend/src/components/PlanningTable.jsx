@@ -221,17 +221,23 @@ export default function PlanningTable({
       ]
     : [];
   const stickyLeft = [...STICKY_LEFT_BASE];
+  // Plan is referenced, not duplicated: STICKY_RIGHT already defines it at
+  // index 2, so we position that existing entry first, then Current Stock and
+  // Required Stock, and slice from index 3 onward — never index 2 — so Plan is
+  // rendered exactly once and every column after it stays aligned.
   const rightWithCurrentQuarter = salesQuarterLabel
     ? [
-        { key: "plan", label: "Plan", width: 100 },
-        renderedRight[0],
-        renderedRight[1],
+        renderedRight[2], // Plan
+        renderedRight[0], // Current Stock
+        renderedRight[1], // Required Stock
         ...cqCols,
-        ...renderedRight.slice(2),
+        ...renderedRight.slice(3), // Monthly Replenishment onward
       ]
     : [
-        { key: "plan", label: "Plan", width: 100 },
-        ...renderedRight,
+        renderedRight[2], // Plan
+        renderedRight[0], // Current Stock
+        renderedRight[1], // Required Stock
+        ...renderedRight.slice(3), // Monthly Replenishment onward
       ];
 
   let leftOffset = 0;

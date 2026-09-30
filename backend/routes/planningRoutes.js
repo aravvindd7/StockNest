@@ -8,6 +8,7 @@ const {
   loadReplenishmentPlan,
   resetReplenishmentPlan,
   applyToAllReplenishmentPlan,
+  exportPlanningData,
 } = require("../controllers/planningController");
 
 const router = express.Router();
@@ -19,6 +20,7 @@ const router = express.Router();
 router.use(requireAuth, requireRole("ADMIN"));
 
 // Fixed paths BEFORE the root GET so "/replenishment" is never shadowed.
+router.get("/export", exportPlanningData);
 router.get("/replenishment", loadReplenishmentPlan);
 router.post("/replenishment", saveReplenishmentPlan);
 router.post("/replenishment/reset", resetReplenishmentPlan);

@@ -1,7 +1,18 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import Navbar from "./Navbar";
+
+const SIDEBAR_STORAGE_KEY = "stocknest_sidebar_collapsed";
+
+function getInitialCollapsedState() {
+  try {
+    const stored = localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    return stored === "true";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Shared shell used by both Admin and User (Section 6 of the spec).
@@ -10,10 +21,27 @@ import Navbar from "./Navbar";
  */
 export default function DashboardLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(getInitialCollapsedState);
+
+  // Persist sidebar collapse state to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
+    } catch {
+      // localStorage unavailable, ignore
+    }
+  }, [sidebarCollapsed]);
+
+  const toggleSidebar = () => setSidebarCollapsed((v) => !v);
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
-      <Sidebar open={sidebarOpen} onNavigate={() => setSidebarOpen(false)} />
+      <Sidebar
+        open={sidebarOpen}
+        collapsed={sidebarCollapsed}
+        onNavigate={() => setSidebarOpen(false)}
+        onToggleCollapse={toggleSidebar}
+      />
 
       {sidebarOpen && (
         <div
@@ -22,7 +50,11 @@ export default function DashboardLayout() {
         />
       )}
 
-      <div className="lg:pl-64">
+      <div
+        className={`transition-all duration-200 ${
+          sidebarCollapsed ? "lg:pl-16" : "lg:pl-64"
+        }`}
+      >
         <Navbar onMenuClick={() => setSidebarOpen((v) => !v)} />
         <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
           <Outlet />

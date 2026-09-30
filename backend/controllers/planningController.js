@@ -1,4 +1,6 @@
 const planningService = require("../services/planningService");
+const { buildXlsxBuffer } = require("../utils/xlsxExport");
+const { MONTHS_BY_QUARTER } = require("../utils/financialYear");
 
 /**
  * GET /api/planning/years — Admin only.
@@ -187,4 +189,170 @@ async function applyToAllReplenishmentPlan(req, res) {
   }
 }
 
-module.exports = { getPlanningData, getAvailableStartYears, saveReplenishmentPlan, loadReplenishmentPlan, resetReplenishmentPlan, applyToAllReplenishmentPlan };
+const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
+
+const MONTH_ABBREV = { April: "Apr", May: "May", June: "Jun", July: "Jul", August: "Aug", September: "Sep", October: "Oct", November: "Nov", December: "Dec", January: "Jan", February: "Feb", March: "Mar" };
+
+const WEEK_STATUS_LABEL = { CRITICAL: "Critical", HEALTHY: "Healthy", HIGH: "High Stock" };
+
+/**
+ * Build 5 export columns per FY group: Q1, Q2, Q3, Q4, Total.
+ * Labels like "2024-25 Q1", "2024-25 Q2", ..., "2024-25 Total".
+ */
+function buildFYGroupColumns(groups) {
+  const cols = [];
+  for (const g of groups) {
+    const prefix = g.viewYear.label;
+    for (const q of QUARTERS) {
+      cols.push({ key: `${prefix} ${q}`, label: `${prefix} ${q}` });
+    }
+    cols.push({ key: `${prefix} Total`, label: `${prefix} Total` });
+  }
+  return cols;
+}
+
+/**
+ * Flatten FY group quarter/total values from a row's `years` map into a flat
+ * object keyed by "2024-25 Q1", "2024-25 Total", etc.
+ */
+function flattenFYGroups(row, groups) {
+  const flat = {};
+  for (const g of groups) {
+    const block = row.years?.[g.viewYear.value];
+    const prefix = g.viewYear.label;
+    for (const q of QUARTERS) {
+      flat[`${prefix} ${q}`] = block?.quarters?.[q]?.qty ?? "";
+    }
+    flat[`${prefix} Total`] = block?.total ?? "";
+  }
+  return flat;
+}
+
+/**
+ * Format a ReplenishmentPlan object as a text cell matching
+ * PlanningTable's ReplenishmentPlanCell rendering.
+ */
+function formatReplenishmentPlan(plan) {
+  if (!plan || plan.requiredStock === 0) return "—";
+  if (plan.state === "insufficient_forecast" || plan.state === "invalid_stock") return "N/A · Insufficient Forecast";
+  if (plan.state === "no_forecast_demand") return "No forecast demand";
+  if (!plan.distribution || plan.distribution.length === 0) return "—";
+  const pct = plan.distribution.map((d) => Math.round(d.percentage));
+  const sum = pct.reduce((s, v) => s + v, 0);
+  if (sum !== 100 && pct.length) pct[pct.length - 1] += 100 - sum;
+  const summary = pct.map((p) => `${p}%`).join(" / ");
+  const tag = plan.mode === "MANUAL" ? "MANUAL" : "AUTO";
+  return `${summary} ${tag}`;
+}
+
+/**
+ * Format Monthly Replenishment as a text cell matching PlanningTable's
+ * MonthlyReplenishmentCell rendering — e.g. "Apr: 100 | May: 200 | Jun: 300".
+ */
+function formatMonthlyReplenishment(plan, workingQuarter) {
+  if (!plan || plan.requiredStock === 0 || plan.state === "insufficient_forecast" || plan.state === "invalid_stock") return "—";
+  const months = MONTHS_BY_QUARTER[workingQuarter];
+  if (!months || !plan.distribution || plan.distribution.length === 0) return "—";
+  return months.map((m, idx) => {
+    const d = plan.distribution[idx];
+    const val = d && Number.isFinite(d.quantity) && d.quantity != null ? Number(d.quantity) : "—";
+    return `${MONTH_ABBREV[m] || m}: ${val}`;
+  }).join(" | ");
+}
+
+/**
+ * Format Week Coverage as a text cell matching PlanningTable's
+ * WeekCoverageCell rendering — e.g. "2.5 weeks · Healthy".
+ */
+function formatWeekCoverage(wc) {
+  if (!wc) return "N/A";
+  if (wc.state === "invalid_stock") return "N/A";
+  if (wc.state === "insufficient_forecast") return "N/A · Insufficient Forecast";
+  if (wc.state === "no_forecast_demand") return "No forecast demand";
+  const weeks = wc.weeks === 0 ? "0" : wc.weeks.toFixed(1);
+  return `${weeks} weeks · ${WEEK_STATUS_LABEL[wc.status] || wc.status}`;
+}
+
+/**
+ * Format a trend value as a text arrow matching PlanningTable's TrendArrow.
+ */
+function formatTrend(t) {
+  if (t === "up") return "↗";
+  if (t === "down") return "↘";
+  if (t === "flat") return "→";
+  return "";
+}
+
+/**
+ * GET /api/planning/export — Admin only. Exports the filtered Planning
+ * Master view as an .xlsx file. Reuses buildPlanningView with the same
+ * query params to guarantee backend-as-source-of-truth.
+ */
+async function exportPlanningData(req, res) {
+  try {
+    const { search, trend, stockRisk } = req.query;
+    const growthPct = readNumberFilter(req.query, "growthPct");
+    const confidence = readNumberFilter(req.query, "confidence");
+
+    const result = await planningService.buildPlanningView({ search, trend, stockRisk, growthPct, confidence });
+
+    const currentQuarterLabel = result.currentQuarter?.label || "Q1";
+    const hasForecastData = Boolean(result.hasForecastData);
+
+    // Dynamic current-quarter columns
+    const cqCols = [
+      { key: "currentQuarterSales", label: `${currentQuarterLabel} Sales` },
+      { key: "currentQuarterSalesToGo", label: `${currentQuarterLabel} Sales to Go` },
+    ];
+
+    // Sticky-right operational columns (mirrors PlanningTable STICKY_RIGHT)
+    const rightCols = [
+      { key: "plan", label: "Plan" },
+      { key: "currentStock", label: "Current Stock" },
+      { key: "requiredStock", label: "Required Stock" },
+      ...cqCols,
+      { key: "monthlyReplenishment", label: "Monthly Replenishment" },
+      { key: "replenishmentPlan", label: "Replenishment Plan" },
+      { key: "weekCoverage", label: "Week Coverage" },
+      { key: "safetyStock", label: "Safety Stock" },
+      { key: "trend", label: "Trend" },
+    ];
+    if (hasForecastData) {
+      rightCols.push({ key: "confidence", label: "Forecast Confidence" });
+    }
+
+    const columns = [
+      { key: "materialNo", label: "Material No" },
+      { key: "materialName", label: "Material Name" },
+      ...buildFYGroupColumns(result.groups),
+      ...rightCols,
+    ];
+
+    const rows = result.data.map((row) => ({
+      materialNo: row.materialNo,
+      materialName: row.materialName,
+      ...flattenFYGroups(row, result.groups),
+      plan: row.planDemand ?? "",
+      currentStock: row.currentStock ?? "",
+      requiredStock: row.requiredStock ?? "",
+      currentQuarterSales: row.currentQuarterSales ?? "",
+      currentQuarterSalesToGo: row.currentQuarterSalesToGo ?? "",
+      monthlyReplenishment: formatMonthlyReplenishment(row.replenishmentPlan, result.workingQuarter),
+      replenishmentPlan: formatReplenishmentPlan(row.replenishmentPlan),
+      weekCoverage: formatWeekCoverage(row.weekCoverage),
+      safetyStock: row.safetyStock ?? "",
+      trend: formatTrend(row.trend),
+      confidence: row.confidence ?? "",
+    }));
+
+    const buffer = buildXlsxBuffer(columns, rows);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", 'attachment; filename="planning_master.xlsx"');
+    res.send(buffer);
+  } catch (err) {
+    console.error("[planningController.exportPlanningData]", err);
+    res.status(500).json({ message: "Export failed", error: err.message });
+  }
+}
+
+module.exports = { getPlanningData, getAvailableStartYears, saveReplenishmentPlan, loadReplenishmentPlan, resetReplenishmentPlan, applyToAllReplenishmentPlan, exportPlanningData };

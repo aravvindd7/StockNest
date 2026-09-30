@@ -5,7 +5,7 @@ import PlanDetailsDrawer from "../components/PlanDetailsDrawer";
 import ReplenishmentDetailsDrawer from "../components/ReplenishmentDetailsDrawer";
 import FilterManager from "../components/table/FilterManager";
 import { useTableFilters } from "../components/table/useTableFilters";
-import { fetchPlanningComparison, regenerateForecast } from "../services/planningService";
+import { fetchPlanningComparison, regenerateForecast, exportPlanningXlsx } from "../services/planningService";
 
 // Planning Master's filters are the "intelligent" kind (Trend, Growth %,
 // Forecast Confidence, Stock Risk) — there's no natural per-column icon
@@ -42,6 +42,14 @@ const ADVANCED_FIELDS = [
  * (the current working quarter's demand) and REQUIRED STOCK sit alongside
  * it as the operational decision layer.
  */
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+    </svg>
+  );
+}
+
 export default function PlanningMaster() {
   const filterState = useTableFilters({ filterConfig: FILTER_CONFIG });
 
@@ -55,6 +63,7 @@ export default function PlanningMaster() {
   const [planTarget, setPlanTarget] = useState(null); // row | null → Plan Details sidebar (read-only)
   const [replenishTarget, setReplenishTarget] = useState(null); // row | null → Replenishment Details sidebar (editable)
   const [regenerating, setRegenerating] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -94,6 +103,18 @@ export default function PlanningMaster() {
       setError(err.response?.data?.message || "Regeneration failed. Is the ML service running?");
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    setError(null);
+    try {
+      await exportPlanningXlsx(filterState.queryParams);
+    } catch (err) {
+      setError(err.response?.data?.message || "Export failed.");
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -156,6 +177,14 @@ export default function PlanningMaster() {
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={handleExport}
+            disabled={exporting || loading}
+            className="sn-btn-ghost"
+          >
+            <DownloadIcon />
+            {exporting ? "Exporting…" : "Export"}
+          </button>
           <button
             onClick={handleRegenerate}
             disabled={regenerating || loading}

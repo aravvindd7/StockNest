@@ -21,6 +21,38 @@ export async function fetchPlanningComparison(params = {}) {
   return data;
 }
 
+function cleanParams(params) {
+  const out = {};
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== "" && v !== undefined && v !== null) out[k] = v;
+  });
+  return out;
+}
+
+/**
+ * Triggers a browser download of the filtered Planning Master dataset as a
+ * real .xlsx file (same pattern as Material/Depot/Stock export). The export
+ * endpoint reuses the same backend buildPlanningView pipeline with the same
+ * query params, so the downloaded file always matches the current filtered
+ * view — ALL matching rows, not just the paginated page.
+ */
+export async function exportPlanningXlsx(params = {}) {
+  const response = await api.get("/planning/export", {
+    params: cleanParams(params),
+    responseType: "blob",
+  });
+  const url = URL.createObjectURL(
+    new Blob([response.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "planning_master.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 /**
  * Selectable financial years — retained for backward compatibility.
  * Planning Master no longer uses a FY selector: the timeline (Previous |
