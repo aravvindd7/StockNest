@@ -15,6 +15,9 @@ pip install -r requirements.txt
 
 ## Configuration (environment variables, all optional)
 
+Variables are read from the process environment, then from `ml-service/.env`
+if present (`cp .env.example .env`); the process environment wins.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `MONGO_URI` | *(unset)* | If set and reachable, Sales history is read from MongoDB's `sales` collection — the production path. |

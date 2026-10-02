@@ -5,6 +5,8 @@ Reads MONGO_URI/MONGO_DB from the environment (matching the pattern the
 existing Node backend already uses in its own .env) — no credentials are
 hardcoded, and this file never reads or writes the Node backend's .env
 directly (Phase 4 Section: "DO NOT modify .env files or expose credentials").
+The ML service's OWN ml-service/.env (if present) is loaded first, mirroring
+the backend's own .env; real environment variables always take precedence.
 
 EXCEL_FALLBACK_PATH points at the frozen, Phase-3-audited synchronized
 dataset. It exists so this service is runnable and its backtest results
@@ -16,6 +18,13 @@ path is never touched.
 """
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# ml-service/.env only — never the Node backend's. override=False keeps any
+# variable already set in the process environment (including an explicitly
+# empty MONGO_URI, which forces the Excel fallback).
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 MONGO_URI = os.environ.get("MONGO_URI", "")
 MONGO_DB = os.environ.get("MONGO_DB", "stocknest")
