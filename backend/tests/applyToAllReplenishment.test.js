@@ -123,6 +123,7 @@ const originalResolve = Module._resolveFilename;
 const originalLoad = Module._load;
 
 const mockModules = {
+  "../models/ForecastErrorStats": { find: () => ({ lean: async () => [] }) },
   "../models/Material": MaterialMock,
   "../models/Stock": StockMock,
   "../models/Sales": SalesMock,

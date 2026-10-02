@@ -125,6 +125,7 @@ const Module = require("module");
 const originalResolve = Module._resolveFilename;
 const originalLoad = Module._load;
 const mockModules = {
+  "../models/ForecastErrorStats": { find: () => ({ lean: async () => [] }) },
   "../models/Material": MaterialMock,
   "../models/Stock": StockMock,
   "../models/Sales": SalesMock,
@@ -360,4 +361,15 @@ test("17. existing buildPlanningView functionality is unaffected", async () => {
   assert.ok(!materialNos.includes("MAT-C"));
   // Response format is valid
   assert.equal(res._status, 200);
+});
+
+test('export includes persisted Safety Stock without changing Required Stock', async (t) => {
+  t.mock.method(mockModules['../models/ForecastErrorStats'], 'find', () => ({
+    lean: async () => [{ materialNo: 'MAT-A', safetyStock: 137, status: 'FORECAST_ERROR_BASED' }],
+  }));
+  const res = makeRes();
+  await exportPlanningData(makeReq(), res);
+  const matA = capturedRows.find(row => row.materialNo === 'MAT-A');
+  assert.equal(matA.safetyStock, 137);
+  assert.equal(matA.requiredStock, 170);
 });

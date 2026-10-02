@@ -373,6 +373,7 @@ const Module = require("module");
 const originalResolve = Module._resolveFilename;
 const originalLoad = Module._load;
 const mockModules = {
+  "../models/ForecastErrorStats": { find: () => ({ lean: async () => [] }) },
   "../models/Material": MaterialMock,
   "../models/Stock": StockMock,
   "../models/Sales": SalesMock,
@@ -448,4 +449,75 @@ test("31. no N+1: exactly one Sales aggregation and one forecast fetch", async (
   await buildPlanningView();
   assert.equal(salesAggregateCalls, 1, "Sales.aggregate must run once for all rows");
   assert.equal(predictionsFindCalls, 1, "ForecastPredictions.find must run once for all rows");
+});
+
+// Persisted Safety Stock integration: exercise the full planning response.
+test('Planning reads each material statistic in one bulk query without ML or refresh', async (t) => {
+  const statsModel = mockModules['../models/ForecastErrorStats'];
+  const records = [
+    { materialNo: ' mat-a ', safetyStock: 137, status: 'FORECAST_ERROR_BASED', percentile: 0.9, observationCount: 12, underForecastCount: 7 },
+    { materialNo: 'mat-b', safetyStock: 23, status: 'FORECAST_ERROR_BASED', percentile: 0.9, observationCount: 8, underForecastCount: 3 },
+  ];
+  const find = t.mock.method(statsModel, 'find', (query) => {
+    assert.deepEqual(query, { materialNo: { $in: ['MAT-A', 'MAT-B'] } });
+    return { lean: async () => records };
+  });
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('Planning must not call ML'); });
+  const result = await buildPlanningView();
+  assert.equal(find.mock.callCount(), 1);
+  assert.equal(fetch.mock.callCount(), 0);
+  assert.deepEqual(result.data.map(row => row.safetyStock), [137, 23]);
+  assert.deepEqual(result.data[0].safetyStockMetadata, {
+    status: 'FORECAST_ERROR_BASED', percentile: 0.9, observationCount: 12, underForecastCount: 7,
+  });
+  assert.equal(result.data[0].requiredStock, 170);
+  assert.equal(result.data[1].requiredStock, 130);
+});
+
+test('Planning lookup normalizes material keys without changing displayed identifiers', async (t) => {
+  t.mock.method(MaterialMock, 'find', () => ({ sort: () => ({ lean: async () => [{ materialNo: ' mat-a ', description: 'Alpha' }] }) }));
+  t.mock.method(mockModules['../models/ForecastErrorStats'], 'find', query => {
+    assert.deepEqual(query.materialNo.$in, ['MAT-A']);
+    return { lean: async () => [{ materialNo: 'MAT-A', safetyStock: 57, status: 'FORECAST_ERROR_BASED' }] };
+  });
+  const result = await buildPlanningView();
+  assert.equal(result.data[0].materialNo, ' mat-a ');
+  assert.equal(result.data[0].safetyStock, 57);
+});
+
+test('Planning missing statistics default to zero and no invented metadata', async () => {
+  const result = await buildPlanningView();
+  for (const row of result.data) {
+    assert.equal(row.safetyStock, 0);
+    assert.equal(row.safetyStockMetadata, null);
+  }
+});
+
+for (const status of ['INSUFFICIENT_HISTORY', 'NO_HISTORICAL_UNDERFORECAST']) {
+  test(`Planning preserves persisted zero and ${status} status`, async (t) => {
+    t.mock.method(mockModules['../models/ForecastErrorStats'], 'find', () => ({ lean: async () => [{ materialNo: 'MAT-A', safetyStock: 0, status }] }));
+    const result = await buildPlanningView();
+    assert.equal(result.data[0].safetyStock, 0);
+    assert.equal(result.data[0].safetyStockMetadata.status, status);
+  });
+}
+
+test('Persisted Safety Stock changes only Safety Stock-dependent planning fields', async (t) => {
+  const before = await buildPlanningView();
+  t.mock.method(mockModules['../models/ForecastErrorStats'], 'find', () => ({ lean: async () => [{ materialNo: 'MAT-A', safetyStock: 137, status: 'FORECAST_ERROR_BASED' }] }));
+  const after = await buildPlanningView();
+  const independent = row => {
+    const { safetyStock, safetyStockMetadata, stockRisk, inventoryDecision, ...rest } = row;
+    return rest;
+  };
+  assert.deepEqual(after.data.map(independent), before.data.map(independent));
+  assert.deepEqual(after.groups, before.groups);
+  const row = after.data[0];
+  // Inventory Decision already depends on Safety Stock: preserve its existing formula.
+  for (const quarter of ['Q1', 'Q2', 'Q3', 'Q4']) {
+    const decision = row.inventoryDecision[quarter];
+    assert.equal(decision.safetyStock, 137);
+    assert.equal(decision.projectedStock, row.currentStock - decision.forecastDemand);
+    assert.equal(decision.replenishmentQty, Math.max(0, 137 - decision.projectedStock));
+  }
 });

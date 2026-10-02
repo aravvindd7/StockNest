@@ -34,7 +34,7 @@ const Stock = require("../models/Stock");
 const Sales = require("../models/Sales");
 const ForecastPredictions = require("../models/ForecastPredictions");
 const ReplenishmentPlan = require("../models/ReplenishmentPlan");
-const { computeSafetyStock } = require("../utils/safetyStock");
+const ForecastErrorStats = require("../models/ForecastErrorStats");
 const { buildInventoryDecision } = require("../utils/inventoryDecision");
 const { computeWeekCoverage } = require("../utils/weekCoverage");
 const { computeAllocation, validateDistribution, WORKING_QUARTER_MONTHS } = require("../utils/replenishmentAllocation");
@@ -381,14 +381,21 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
   // (a forecast that crosses the FY boundary is presented — it is part of
   // the active rolling window — not a standalone forecast year column).
   const nextFyLabel = finYearLabel(activeFyStart + 1);
-  const [stockRows, salesRows, mlPredictionRows, replenishmentRows] = await Promise.all([
+  const [stockRows, salesRows, mlPredictionRows, replenishmentRows, safetyStockRows] = await Promise.all([
     Stock.find({}).select("MatNo TotalStockQty").lean(),
     Sales.aggregate([
       { $group: { _id: { MatNo: "$MatNo", FinancialYear: "$FinancialYear", Quarter: "$Quarter", Month: "$Month" }, qty: { $sum: "$SalesQty" } } },
     ]),
     ForecastPredictions.find({ financialYear: { $in: [activeFyLabel, nextFyLabel] } }).lean(),
     ReplenishmentPlan.find({ financialYear: activeFyLabel, quarter: workingQuarter }).lean(),
+    ForecastErrorStats.find({
+      materialNo: { $in: materials.map((m) => String(m.materialNo || "").trim().toUpperCase()) },
+    }).lean(),
   ]);
+
+  const safetyStockByMat = new Map(safetyStockRows.map((stats) => [
+    String(stats.materialNo || "").trim().toUpperCase(), stats,
+  ]));
 
   const stockByMat = {};
   stockRows.forEach((s) => {
@@ -448,12 +455,9 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     const materialForecast = forecastByMatMonth[key] || {};
     const historyYears = Object.keys(materialSalesHistory).map(Number).sort((a, b) => a - b);
 
-    // Safety stock: computed from ALL quarterly history — FY-independent.
-    const allQuarterValues = [];
-    Object.values(materialSalesHistory).forEach((yearData) => {
-      QUARTERS.forEach((q) => allQuarterValues.push(yearData[q] || 0));
-    });
-    const safetyStock = computeSafetyStock(allQuarterValues);
+    // Read material-level persisted statistics; never refresh on the planning read path.
+    const safetyStockStats = safetyStockByMat.get(String(key || "").trim().toUpperCase());
+    const safetyStock = safetyStockStats ? safetyStockStats.safetyStock : 0;
 
     // Per-FY blocks keyed by FY start year.
     const years = {};
@@ -627,6 +631,12 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       currentQuarterSales,
       currentQuarterSalesToGo,
       safetyStock,
+      safetyStockMetadata: safetyStockStats ? {
+        status: safetyStockStats.status,
+        percentile: safetyStockStats.percentile,
+        observationCount: safetyStockStats.observationCount,
+        underForecastCount: safetyStockStats.underForecastCount,
+      } : null,
       currentStock,
       trend,
       stockRisk,

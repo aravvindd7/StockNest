@@ -43,6 +43,7 @@ class ForecastRequest(BaseModel):
 
 class BacktestRequest(BaseModel):
     maxHorizon: int = 6  # Phase B: backtest capped at the production horizon (6); 1 would reduce to Phase 4's original single-step behavior
+    includeRows: bool = False  # Stage 2: opt-in to expose row-level predictions for Safety Stock
 
 
 @app.get("/health")
@@ -85,7 +86,7 @@ def backtest(req: BacktestRequest = BacktestRequest()):
         multi_step_results = run_multi_step_backtest(feat, max_horizon=req.maxHorizon)
         profile = horizon_profile(multi_step_results)
 
-        return {
+        response = {
             "dataSource": source,
             "evaluatedRows": len(results),
             "overall": {
@@ -113,6 +114,12 @@ def backtest(req: BacktestRequest = BacktestRequest()):
                 "byPlantAndHorizon": segment_by_horizon(multi_step_results, "Plant"),
             },
         }
+
+        # Stage 2: optionally include row-level predictions for Safety Stock
+        if req.includeRows:
+            response["rows"] = results.to_dict(orient="records")
+
+        return response
     except Exception as exc:  # noqa: BLE001
         logger.exception("Backtest failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc

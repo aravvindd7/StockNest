@@ -5,6 +5,7 @@ const Material = require("../models/Material");
 const DatasetHistory = require("../models/DatasetHistory");
 const { parseWorkbook, validateHeaders, normalizeRow } = require("../utils/excelParser");
 const { archiveSnapshot } = require("../utils/datasetHistoryHelper");
+const { refreshAfterSalesMutation } = require("../services/safetyStockRefreshTrigger");
 const { buildMatchQuery } = require("../utils/salesMatcher");
 const { deriveQuarter, derivePeriod, isValidMonth, isValidFinancialYear } = require("../utils/financialYear");
 
@@ -183,6 +184,10 @@ async function importSales(req, res) {
       addedCount = validRows.length;
     }
 
+    if (addedCount + updatedCount > 0) {
+      await refreshAfterSalesMutation();
+    }
+
     res.json({
       fileName: req.file.originalname,
       importType: mode,
@@ -228,6 +233,8 @@ async function viewImportHistory(req, res) {
     if (entry.snapshotData.length > 0) {
       await Sales.insertMany(entry.snapshotData);
     }
+
+    await refreshAfterSalesMutation();
 
     res.json({ message: `Restored ${entry.batchId} as the active Sales Master.`, restoredCount: entry.snapshotData.length });
   } catch (err) {

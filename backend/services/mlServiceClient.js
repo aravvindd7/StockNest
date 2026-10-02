@@ -58,4 +58,17 @@ async function requestBacktest() {
   return callMlService("/backtest", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
 }
 
-module.exports = { checkHealth, requestForecast, requestBacktest, ML_SERVICE_URL };
+/**
+ * Returns row-level backtest predictions for Safety Stock calculation.
+ * Stage 2: exposes the existing leakage-safe walk-forward backtest predictions
+ * at the row level (MatNo, Plant, FinancialYear, Month, actual, xgb_pred, wma_pred).
+ */
+async function requestBacktestRows() {
+  return callMlService("/backtest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ includeRows: true }),
+  });
+}
+
+module.exports = { checkHealth, requestForecast, requestBacktest, requestBacktestRows, ML_SERVICE_URL };
