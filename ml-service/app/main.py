@@ -18,7 +18,7 @@ Endpoints:
 Run with: uvicorn app.main:app --host 0.0.0.0 --port 8000
 """
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -29,6 +29,7 @@ from app.features import build_feature_table
 from app.backtest import run_backtest, summarize, segment_summary
 from app.multi_step_backtest import run_multi_step_backtest, horizon_profile, segment_by_horizon, summarize_multi_step
 from app.forecast import generate_forecasts
+from app.baselines import baseline_evaluation, material_plant_summary, depot_summary
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("stocknest_ml.main")
@@ -44,6 +45,9 @@ class ForecastRequest(BaseModel):
 class BacktestRequest(BaseModel):
     maxHorizon: int = 6  # Phase B: backtest capped at the production horizon (6); 1 would reduce to Phase 4's original single-step behavior
     includeRows: bool = False  # Stage 2: opt-in to expose row-level predictions for Safety Stock
+    # Distribution Stage 2 (both opt-in; omitted = the exact previous response):
+    includeBaselines: bool = False  # adds "baselines" + "byMaterialPlant" (seasonal naive, MA3/6/12, seasonal WMA, Croston/SBA)
+    depotMapping: Optional[Dict[str, str]] = None  # {plantName: depotId} from the backend's DepotPlantMapping; adds "byDepot"
 
 
 @app.get("/health")
@@ -73,7 +77,7 @@ def backtest(req: BacktestRequest = BacktestRequest()):
     try:
         df, source = load_sales_history()
         feat = build_feature_table(df)
-        results = run_backtest(feat)
+        results = run_backtest(feat, include_baselines=req.includeBaselines)
 
         wma_overall = summarize(results, "wma_pred")
         xgb_overall = summarize(results, "xgb_pred")
@@ -115,9 +119,17 @@ def backtest(req: BacktestRequest = BacktestRequest()):
             },
         }
 
+        # Distribution Stage 2: evidence for model selection (additive keys only)
+        if req.includeBaselines:
+            response["baselines"] = baseline_evaluation(results)
+            response["byMaterialPlant"] = material_plant_summary(results)
+        if req.depotMapping:
+            response["byDepot"] = depot_summary(results, req.depotMapping)
+
         # Stage 2: optionally include row-level predictions for Safety Stock
         if req.includeRows:
-            response["rows"] = results.to_dict(orient="records")
+            # Baseline columns can be NaN ("unavailable"), which is not valid JSON — emit null instead.
+            response["rows"] = results.astype(object).where(results.notna(), None).to_dict(orient="records")
 
         return response
     except Exception as exc:  # noqa: BLE001

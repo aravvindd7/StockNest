@@ -3,6 +3,15 @@ const Depot = require("../models/Depot");
 const DatasetHistory = require("../models/DatasetHistory");
 const { parseWorkbook, validateHeaders, normalizeRow } = require("../utils/excelParser");
 const { archiveSnapshot } = require("../utils/datasetHistoryHelper");
+const { findDepotReferences, depotReferencedBody } = require("../utils/distributionGuards");
+
+/** Referenced depot IDs (Distribution) that a full replacement set would drop. */
+async function droppedReferencedDepots(currentIds, incomingIds) {
+  const incoming = new Set(incomingIds.map((d) => String(d || "").trim().toUpperCase()));
+  const dropped = currentIds.filter((d) => !incoming.has(d));
+  const references = await findDepotReferences(dropped);
+  return Object.keys(references).length ? references : null;
+}
 
 const MODULE_KEY = "depot";
 const IMPORT_MODES = ["APPEND", "REPLACE"];
@@ -101,6 +110,9 @@ async function importDepots(req, res) {
       }
     } else {
       const currentActive = await Depot.find({}).lean();
+      // Distribution Stage 4: a REPLACE must not drop a depot that Distribution references.
+      const dropped = await droppedReferencedDepots(currentActive.map((d) => d.depotId), validRows.map((r) => r.depotId));
+      if (dropped) return res.status(409).json(depotReferencedBody(dropped, "This Depot REPLACE import"));
       await archiveSnapshot({
         moduleKey: MODULE_KEY,
         activeRecords: currentActive,
@@ -151,6 +163,8 @@ async function viewImportHistory(req, res) {
     if (!entry) return res.status(404).json({ message: "Import history entry not found." });
 
     const currentActive = await Depot.find({}).lean();
+    const dropped = await droppedReferencedDepots(currentActive.map((d) => d.depotId), entry.snapshotData.map((d) => d.depotId));
+    if (dropped) return res.status(409).json(depotReferencedBody(dropped, "Restoring this depot snapshot"));
     await archiveSnapshot({
       moduleKey: MODULE_KEY,
       activeRecords: currentActive,

@@ -71,4 +71,20 @@ async function requestBacktestRows() {
   });
 }
 
-module.exports = { checkHealth, requestForecast, requestBacktest, requestBacktestRows, ML_SERVICE_URL };
+/**
+ * Distribution Stage 2: the same backtest with the opt-in evaluation extras —
+ * comparison baselines, Material × Plant accuracy and (given a
+ * { plantName: depotId } map) depot-level accuracy. Evidence only; it does
+ * not change which model production forecasting uses.
+ */
+async function requestBacktestEvaluation({ depotMapping } = {}) {
+  const body = { includeBaselines: true };
+  if (depotMapping && Object.keys(depotMapping).length) body.depotMapping = depotMapping;
+  return callMlService("/backtest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+module.exports = { checkHealth, requestForecast, requestBacktest, requestBacktestRows, requestBacktestEvaluation, ML_SERVICE_URL };

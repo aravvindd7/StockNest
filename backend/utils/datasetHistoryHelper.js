@@ -1,6 +1,6 @@
 const DatasetHistory = require("../models/DatasetHistory");
 
-const MODULE_PREFIX = { material: "MAT", depot: "DEP", stock: "STK", sales: "SAL" };
+const MODULE_PREFIX = { material: "MAT", depot: "DEP", stock: "STK", sales: "SAL", depotPlantMapping: "DPM" };
 
 /** Strips Mongo/Mongoose bookkeeping fields so a snapshot holds only business data. */
 function stripInternalFields(doc) {

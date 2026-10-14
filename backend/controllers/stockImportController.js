@@ -6,6 +6,7 @@ const { parseWorkbook, validateHeaders, normalizeRow } = require("../utils/excel
 const { archiveSnapshot } = require("../utils/datasetHistoryHelper");
 const { buildMatchQuery } = require("../utils/stockMatcher");
 const { loadMaterialStatusMap } = require("../utils/stockStatusSync");
+const { findStockImportConflicts, stockImportBlockedBody } = require("../utils/distributionGuards");
 
 const MODULE_KEY = "stock";
 const IMPORT_MODES = ["APPEND", "REPLACE"];
@@ -131,6 +132,10 @@ async function importStock(req, res) {
       else errors.push({ row: rowNumber, materialNo: result.matchKey, error: result.errors.join(" ") });
     });
 
+    // Distribution Stage 4: never overwrite/undo stock that is in motion.
+    const conflicts = await findStockImportConflicts(mode, validRows);
+    if (conflicts.length) return res.status(409).json(stockImportBlockedBody(conflicts, `Stock ${mode} import`));
+
     let addedCount = 0;
     let updatedCount = 0;
 
@@ -210,6 +215,10 @@ async function viewImportHistory(req, res) {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ message: "Invalid history id." });
     const entry = await DatasetHistory.findOne({ _id: req.params.id, module: MODULE_KEY });
     if (!entry) return res.status(404).json({ message: "Import history entry not found." });
+
+    // Distribution Stage 4: a restore replaces every Stock row — never while stock is in motion.
+    const conflicts = await findStockImportConflicts("RESTORE");
+    if (conflicts.length) return res.status(409).json(stockImportBlockedBody(conflicts, "Stock import-history restore"));
 
     const currentActive = await Stock.find({}).lean();
     await archiveSnapshot({

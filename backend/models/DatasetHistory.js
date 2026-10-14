@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const MODULES = ["material", "depot", "stock", "sales"];
+const MODULES = ["material", "depot", "stock", "sales", "depotPlantMapping"]; // depotPlantMapping: Distribution Stage 2
 const IMPORT_TYPES = ["INITIAL", "APPEND", "REPLACE", "RESTORE"];
 
 /**

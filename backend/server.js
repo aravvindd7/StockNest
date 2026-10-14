@@ -12,6 +12,7 @@ const stockRoutes = require("./routes/stockRoutes");
 const salesRoutes = require("./routes/salesRoutes");
 const planningRoutes = require("./routes/planningRoutes");
 const forecastRoutes = require("./routes/forecastRoutes");
+const distributionRoutes = require("./routes/distributionRoutes");
 
 const app = express();
 
@@ -41,6 +42,8 @@ app.use("/api/planning", planningRoutes);
 // Phase 4: new, isolated infrastructure — the ML forecasting engine.
 // Does not modify any existing route below or above it.
 app.use("/api/forecast", forecastRoutes);
+// Distribution Master — Stage 1 read-only foundation (Admin only).
+app.use("/api/distribution", distributionRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {
@@ -73,6 +76,19 @@ async function start() {
     );
   } catch (err) {
     console.error("[sync] Stock status backfill failed (continuing startup):", err.message);
+  }
+
+  // Distribution Stage 4: physical stock movements need MongoDB transactions
+  // (a replica set). Probe once at startup; without them the movement
+  // endpoints fail closed with 503 (see utils/transactions.js).
+  try {
+    const { checkTransactionSupport, transactionStatus } = require("./utils/transactions");
+    const ok = await checkTransactionSupport();
+    console.log(ok
+      ? "[transactions] MongoDB transactions available — Distribution stock movements enabled."
+      : `[transactions] MongoDB transactions UNAVAILABLE (${transactionStatus().lastError}) — Distribution stock movement endpoints will return 503.`);
+  } catch (err) {
+    console.error("[transactions] Capability check failed (movement endpoints will return 503):", err.message);
   }
 
   app.listen(PORT, () => {

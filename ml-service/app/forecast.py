@@ -50,6 +50,17 @@ def _next_month(financial_year: str, month: str):
     return next_fy, MONTH_ORDER[0]
 
 
+def future_financial_year_index(last_month_index: int, months_ahead: int) -> int:
+    """
+    financial_year_index of the month `months_ahead` after a series' last real
+    month. month_index is FY-position * 12 + month-within-FY (features.py), so
+    the FY position of any month is simply month_index // 12 — the same value
+    features.py assigns to real rows and multi_step_backtest.py assigns via
+    divmod, keeping live inference consistent with the backtest.
+    """
+    return (int(last_month_index) + months_ahead) // 12
+
+
 def train_production_model(feat: pd.DataFrame) -> xgb.XGBRegressor:
     # Phase B: train on the most recent TRAINING_WINDOW_MONTHS (18) months
     # of history only — the empirically-benchmarked optimal window. Using
@@ -199,7 +210,7 @@ def generate_forecasts(sales_df: pd.DataFrame, horizon_months: int = 12, start_f
             else:
                 row = build_recursive_step_row(
                     history_values, matno, plant, production_cycle, material_group, month, quarter,
-                    last["financial_year_index"] + ((n_real_months + step - 1) // 12),
+                    future_financial_year_index(last["month_index"], step),
                 )
                 X = pd.DataFrame([row])
                 for col in CATEGORICAL_FEATURES:

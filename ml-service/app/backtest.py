@@ -29,6 +29,7 @@ import xgboost as xgb
 from app.config import MIN_TRAINING_MONTHS, TRAINING_WINDOW_MONTHS
 from app.features import ALL_FEATURES, CATEGORICAL_FEATURES, TARGET, to_categorical_dtypes
 from app.wma_baseline import wma_predict
+from app.baselines import baseline_predictions
 
 
 def wmape(actual: np.ndarray, forecast: np.ndarray) -> float:
@@ -46,7 +47,7 @@ def rmse(actual: np.ndarray, forecast: np.ndarray) -> float:
     return float(np.sqrt(np.mean((actual - forecast) ** 2)))
 
 
-def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MONTHS, training_window_months: int = TRAINING_WINDOW_MONTHS) -> pd.DataFrame:
+def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MONTHS, training_window_months: int = TRAINING_WINDOW_MONTHS, include_baselines: bool = False) -> pd.DataFrame:
     """
     feat: output of features.build_feature_table (must include month_index).
     Returns a row-level DataFrame: one row per (MatNo, Plant, month_index)
@@ -56,6 +57,12 @@ def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MON
     Phase B: each step trains on the most recent training_window_months
     (18) of history before the step — the same rolling window as the
     production model, so backtest and production see the same data.
+
+    Distribution Stage 2: include_baselines=True adds the comparison
+    baselines from baselines.py (seasonal naive, MA3/6/12, seasonal WMA,
+    Croston/SBA) and each series' demand class, computed from the same
+    strictly-prior history on the same rows. Off by default so every
+    existing caller (including live forecast generation) is unchanged.
     """
     feat = to_categorical_dtypes(feat)
     max_month_index = int(feat["month_index"].max())
@@ -99,16 +106,20 @@ def run_backtest(feat: pd.DataFrame, min_training_months: int = MIN_TRAINING_MON
 
         # ---- WMA: stateless, computed straight from each series' own raw history ----
         for i, (_, row) in enumerate(predict_df.iterrows()):
-            series_history = feat[
+            series_rows = feat[
                 (feat["MatNo"] == row["MatNo"]) & (feat["Plant"] == row["Plant"]) & (feat["month_index"] < step)
-            ].sort_values("month_index")[TARGET]
+            ].sort_values("month_index")
+            series_history = series_rows[TARGET]
             wma_pred = wma_predict(series_history, window=3)
 
-            rows.append({
+            out = {
                 "MatNo": row["MatNo"], "Plant": row["Plant"], "MatGroupName": row["MatGroupName"],
                 "FinancialYear": row["FinancialYear"], "Month": row["Month"], "month_index": step,
                 "actual": row[TARGET], "xgb_pred": float(xgb_preds[i]), "wma_pred": wma_pred,
-            })
+            }
+            if include_baselines:
+                out.update(baseline_predictions(series_rows, step))
+            rows.append(out)
 
     return pd.DataFrame(rows)
 

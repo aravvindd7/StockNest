@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Depot = require("../models/Depot");
 const { buildXlsxBuffer } = require("../utils/xlsxExport");
 const { buildMongoFilter, buildSort, getDistinctValues } = require("../utils/queryFilterBuilder");
+const { findDepotReferences, depotReferencedBody } = require("../utils/distributionGuards");
 
 function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -155,6 +156,10 @@ async function updateDepot(req, res) {
 
     const newDepotId = String(body.depotId).trim().toUpperCase();
     if (newDepotId !== depot.depotId) {
+      // Distribution Stage 4: a referenced depot ID is permanent (the name stays editable).
+      const references = await findDepotReferences([depot.depotId]);
+      if (references[depot.depotId]) return res.status(409).json(depotReferencedBody(references, "Changing this Depot ID"));
+
       const existing = await Depot.findOne({ depotId: newDepotId, _id: { $ne: depot._id } });
       if (existing) {
         return res.status(409).json({ message: "A depot with this Depot ID already exists." });
@@ -188,6 +193,11 @@ async function deleteDepot(req, res) {
     }
     const depot = await Depot.findById(req.params.id);
     if (!depot) return res.status(404).json({ message: "Depot not found." });
+
+    // Distribution Stage 4: the check this comment block anticipated — a depot still
+    // referenced by Distribution cannot be deleted (Depot Master has no deactivation flag).
+    const references = await findDepotReferences([depot.depotId]);
+    if (references[depot.depotId]) return res.status(409).json(depotReferencedBody(references, "Deleting this depot"));
 
     await depot.deleteOne();
     res.json({ message: "Depot deleted.", depotId: depot.depotId });
