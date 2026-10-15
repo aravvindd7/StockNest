@@ -99,6 +99,9 @@ const distributionRecommendationSchema = new mongoose.Schema(
     generatedAt: { type: Date, required: true, default: Date.now, immutable: true },
     generationRunId: { type: String, trim: true, immutable: true }, // groups one engine run, so a re-run can supersede it
     generatedBy: { type: String, trim: true, immutable: true },
+    // Optional traceability: the source-data and forecast versions this run was
+    // computed from (see models/DerivedDataState.js). Absent on older records.
+    inputVersions: { type: mongoose.Schema.Types.Mixed, immutable: true },
 
     // ---- Admin review ----
     status: { type: String, enum: RECOMMENDATION_STATUSES, required: true, default: RECOMMENDATION_INITIAL_STATUS },

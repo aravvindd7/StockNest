@@ -133,8 +133,45 @@ function validateDistribution(distribution, requiredStock) {
   return { valid: true };
 }
 
+/**
+ * Canonical form of an allocation for change detection: month → percentage in
+ * whole hundredths (the 2-dp precision that is persisted and edited).
+ * Quantities are not compared — they are always derived from the percentages
+ * and the current Required Stock. Returns null for anything that is not a
+ * well-formed allocation (missing/duplicate month, non-finite percentage).
+ */
+function allocationKey(distribution) {
+  if (!Array.isArray(distribution) || distribution.length === 0) return null;
+  const byMonth = new Map();
+  for (const d of distribution) {
+    if (!d || typeof d.month !== "string" || !Number.isFinite(d.percentage) || byMonth.has(d.month)) return null;
+    byMonth.set(d.month, Math.round(d.percentage * 100));
+  }
+  return byMonth;
+}
+
+/**
+ * True when two allocations are semantically identical: the same months with
+ * the same percentages (to 0.01%), regardless of array order, property order,
+ * extra fields or float noise. A malformed allocation is never "the same".
+ *
+ * @param {Array<{month: string, percentage: number}>} a
+ * @param {Array<{month: string, percentage: number}>} b
+ * @returns {boolean}
+ */
+function isSameAllocation(a, b) {
+  const ka = allocationKey(a);
+  const kb = allocationKey(b);
+  if (!ka || !kb || ka.size !== kb.size) return false;
+  for (const [month, pct] of ka) {
+    if (kb.get(month) !== pct) return false;
+  }
+  return true;
+}
+
 module.exports = {
   computeAllocation,
+  isSameAllocation,
   computeDefaultAllocation,
   validateDistribution,
   REQUIRED_STOCK_MONTHS,

@@ -352,18 +352,24 @@ function newRunId(now) {
 
 /**
  * @param {object} options  horizonMonths?, materialNos?, dryRun?, allowMissingSafetyStock?
- * @param {object} context  { now, user }
+ * @param {object} context  { now, user, sourceVersions? } — sourceVersions (optional) is
+ *   stamped on each record as inputVersions: the source/forecast versions this run used.
+ *
+ * Only writing runs take the single-run lock; a dry run (Network Analysis) only
+ * reads, so it may run alongside a writing run.
  */
-async function generateRecommendations(options = {}, { now = new Date(), user = "system" } = {}) {
-  if (generationInProgress) {
-    const err = new Error("A recommendation generation run is already in progress.");
-    err.status = 409;
-    throw err;
+async function generateRecommendations(options = {}, { now = new Date(), user = "system", sourceVersions } = {}) {
+  const dryRun = Boolean(options.dryRun);
+  if (!dryRun) {
+    if (generationInProgress) {
+      const err = new Error("A recommendation generation run is already in progress.");
+      err.status = 409;
+      throw err;
+    }
+    generationInProgress = true;
   }
-  generationInProgress = true;
   try {
     const horizonMonths = options.horizonMonths || DEFAULT_HORIZON_MONTHS;
-    const dryRun = Boolean(options.dryRun);
     const allowMissingSafetyStock = Boolean(options.allowMissingSafetyStock);
     const materialNos = options.materialNos ? [...new Set(options.materialNos.map(norm))] : null;
 
@@ -407,6 +413,7 @@ async function generateRecommendations(options = {}, { now = new Date(), user = 
           generationRunId,
           generatedBy: user,
           status: "PENDING",
+          ...(sourceVersions ? { inputVersions: sourceVersions } : {}),
         });
       });
     });
@@ -495,7 +502,7 @@ async function generateRecommendations(options = {}, { now = new Date(), user = 
       dataQualityWarnings: warnings,
     };
   } finally {
-    generationInProgress = false;
+    if (!dryRun) generationInProgress = false;
   }
 }
 

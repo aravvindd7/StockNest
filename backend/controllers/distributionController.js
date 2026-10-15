@@ -2,6 +2,7 @@ const distributionService = require("../services/distributionService");
 const depotDemandService = require("../services/depotDemandService");
 const depotSafetyStockService = require("../services/depotSafetyStockService");
 const recommendationEngine = require("../services/distributionRecommendationService");
+const derivedDataPipeline = require("../services/derivedDataPipeline");
 const { resolveActivePlantMapping } = require("../services/depotPlantMappingService");
 const mlServiceClient = require("../services/mlServiceClient");
 const DepotSafetyStock = require("../models/DepotSafetyStock");
@@ -22,6 +23,16 @@ async function listRecommendations(req, res) {
   } catch (err) {
     console.error("[distributionController.listRecommendations]", err);
     res.status(500).json({ message: "Internal server error while fetching distribution recommendations." });
+  }
+}
+
+/** GET /api/distribution/recommendations/pending-summary — Admin only. PENDING counts/units per priority (ignores list filters). */
+async function getPendingRecommendationSummary(req, res) {
+  try {
+    res.json(await distributionService.pendingRecommendationSummary());
+  } catch (err) {
+    console.error("[distributionController.getPendingRecommendationSummary]", err);
+    res.status(500).json({ message: "Internal server error while summarising pending recommendations." });
   }
 }
 
@@ -188,7 +199,12 @@ async function generateRecommendations(req, res) {
   const { options, errors } = parseGenerateBody(req.body);
   if (errors) return res.status(400).json({ message: "Invalid generation request.", errors });
   try {
-    const result = await recommendationEngine.generateRecommendations(options, { user: req.user.username });
+    // A dry run (Network Analysis) only reads. A writing run is the manual
+    // "Regenerate Recommendations" — routed through the automatic pipeline so
+    // it never overlaps an automatic run and records the inputs it used.
+    const result = options.dryRun
+      ? await recommendationEngine.generateRecommendations(options, { user: req.user.username })
+      : await derivedDataPipeline.regenerateRecommendations(options, { user: req.user.username });
     res.status(result.dryRun ? 200 : 201).json(result);
   } catch (err) {
     if (err.status === 409 || err.status === 422) return res.status(err.status).json({ message: err.message });
@@ -201,6 +217,7 @@ module.exports = {
   generateRecommendations,
   parseGenerateBody,
   listRecommendations,
+  getPendingRecommendationSummary,
   getRecommendationById,
   listTransfers,
   getTransferById,

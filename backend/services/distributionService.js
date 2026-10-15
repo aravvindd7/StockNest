@@ -131,7 +131,30 @@ async function validateReferences({ materialNo, sourceDepotId, destinationDepotI
   return errors;
 }
 
+/**
+ * PENDING recommendations grouped by priority — count, total recommended
+ * units and the id + version of every record, so a bulk approval can target
+ * exactly the set the admin reviewed. Read-only; ignores all list filters.
+ */
+async function pendingRecommendationSummary() {
+  const docs = await DistributionRecommendation.find({ status: "PENDING" }).select("priority recommendedQuantity __v").sort({ _id: 1 }).lean();
+  const priorities = DistributionRecommendation.PRIORITY_VALUES.map((priority) => {
+    const rows = docs.filter((d) => d.priority === priority);
+    return {
+      priority,
+      count: rows.length,
+      units: rows.reduce((s, d) => s + d.recommendedQuantity, 0),
+      recommendations: rows.map((d) => ({ id: String(d._id), version: d.__v })),
+    };
+  });
+  return {
+    priorities,
+    total: { count: docs.length, units: priorities.reduce((s, p) => s + p.units, 0) },
+  };
+}
+
 module.exports = {
+  pendingRecommendationSummary,
   listRecommendations,
   listTransfers,
   getRecommendationById,

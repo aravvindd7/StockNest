@@ -37,8 +37,22 @@ const ReplenishmentPlan = require("../models/ReplenishmentPlan");
 const ForecastErrorStats = require("../models/ForecastErrorStats");
 const { buildInventoryDecision } = require("../utils/inventoryDecision");
 const { computeWeekCoverage } = require("../utils/weekCoverage");
-const { computeAllocation, validateDistribution, WORKING_QUARTER_MONTHS } = require("../utils/replenishmentAllocation");
+const { computeAllocation, isSameAllocation, validateDistribution, WORKING_QUARTER_MONTHS } = require("../utils/replenishmentAllocation");
 const { predictReplenishment, resolveActivePlan } = require("../utils/replenishmentPrediction");
+const { readForecastState } = require("../utils/derivedState");
+
+/**
+ * Has the forecast changed since a MANUAL plan was saved? Uses the plan's
+ * recorded forecast version; for plans saved before versions were recorded,
+ * falls back to comparing the save time with the last forecast generation.
+ */
+function manualPlanNeedsReview(saved, forecastState) {
+  if (!saved || !forecastState) return false;
+  if (Number.isInteger(saved.basedOnForecastVersion) && Number.isInteger(forecastState.version)) {
+    return saved.basedOnForecastVersion !== forecastState.version;
+  }
+  return Boolean(forecastState.lastSuccessAt && saved.updatedAt && new Date(saved.updatedAt) < new Date(forecastState.lastSuccessAt));
+}
 const { MONTHS_BY_QUARTER, QUARTER_BY_MONTH, ALL_MONTHS, finYearLabel, finYearStartCalendarYear, deriveQuarter } = require("../utils/financialYear");
 const { currentFinancialYearStart, planForecastEndMonth } = require("../utils/forecastTargets");
 const { calendarQuarterOfDate, calendarQuarterMonths, fyStartForCalendarQuarter, computeCurrentQuarterMetrics } = require("../utils/currentQuarterSales");
@@ -381,7 +395,7 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
   // (a forecast that crosses the FY boundary is presented — it is part of
   // the active rolling window — not a standalone forecast year column).
   const nextFyLabel = finYearLabel(activeFyStart + 1);
-  const [stockRows, salesRows, mlPredictionRows, replenishmentRows, safetyStockRows] = await Promise.all([
+  const [stockRows, salesRows, mlPredictionRows, replenishmentRows, safetyStockRows, forecastState] = await Promise.all([
     Stock.find({}).select("MatNo TotalStockQty").lean(),
     Sales.aggregate([
       { $group: { _id: { MatNo: "$MatNo", FinancialYear: "$FinancialYear", Quarter: "$Quarter", Month: "$Month" }, qty: { $sum: "$SalesQty" } } },
@@ -391,7 +405,9 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
     ForecastErrorStats.find({
       materialNo: { $in: materials.map((m) => String(m.materialNo || "").trim().toUpperCase()) },
     }).lean(),
+    readForecastState(),
   ]);
+  const forecastVersion = Number.isInteger(forecastState?.version) ? forecastState.version : null;
 
   const safetyStockByMat = new Map(safetyStockRows.map((stats) => [
     String(stats.materialNo || "").trim().toUpperCase(), stats,
@@ -616,12 +632,20 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       activeFyStart,
       financialYear: activeFyLabel,
     });
+    // Traceability: AUTO is always computed from the current stored forecast.
+    autoPlan.basedOnForecastVersion = forecastVersion;
     const replenishmentPlan = resolveActivePlan({
       savedPlan: savedReplenishmentByMat[key],
       autoPlan,
       requiredStock,
       workingQuarter,
     });
+    if (replenishmentPlan.mode === "MANUAL") {
+      // A newer forecast never overwrites the planner's allocation — it is only flagged.
+      const saved = savedReplenishmentByMat[key];
+      replenishmentPlan.basedOnForecastVersion = Number.isInteger(saved.basedOnForecastVersion) ? saved.basedOnForecastVersion : null;
+      replenishmentPlan.forecastChangedSinceSaved = manualPlanNeedsReview(saved, forecastState);
+    }
 
     return {
       materialNo: m.materialNo,
@@ -681,6 +705,7 @@ async function buildPlanningView({ search, trend, stockRisk, growthPct, confiden
       { value: prevFy1, label: finYearLabel(prevFy1) },
     ],
     hasForecastData,
+    forecast: { version: forecastVersion, updatedAt: forecastState?.lastSuccessAt || null },
     groups: groupMeta.map((g) => ({ ...g, hasData: hasDataByFy[g.viewYear.value] })),
     data: filteredData,
   };
@@ -716,8 +741,14 @@ async function getAvailableStartYears() {
  * Recalculates quantities from the supplied percentages using the largest-
  * remainder algorithm, then upserts the ReplenishmentPlan document.
  *
+ * Only a real change is persisted. An allocation identical to the one already
+ * active (the saved MANUAL plan, or — when none is saved — the live AUTO plan)
+ * is not written, so an untouched AUTO plan is never pinned as MANUAL and an
+ * untouched MANUAL plan is not rewritten. Such a call returns the active plan
+ * with `unchanged: true`.
+ *
  * @param {{materialNo, financialYear, quarter, requiredStock, distribution, depotId?, updatedBy?}} params
- * @returns {object} The saved document.
+ * @returns {object} The saved document, or the active plan with `unchanged: true`.
  */
 async function saveReplenishmentPlan({ materialNo, financialYear, quarter, requiredStock, distribution, depotId, updatedBy }) {
   const calc = computeAllocation(requiredStock, distribution.map((d) => d.percentage));
@@ -737,14 +768,55 @@ async function saveReplenishmentPlan({ materialNo, financialYear, quarter, requi
   }
 
   const filter = { materialNo, financialYear, quarter, depotId: depotId || "" };
+  const forecastState = await readForecastState();
+  const forecastVersion = Number.isInteger(forecastState?.version) ? forecastState.version : undefined;
+  const existing = await ReplenishmentPlan.findOne(filter).lean();
+  if (existing) {
+    if (isSameAllocation(existing.distribution, entries)) {
+      // Unchanged. If the forecast moved on since it was saved, re-saving is the
+      // planner confirming the allocation against the current forecast: only the
+      // forecast reference is updated — the allocation itself is untouched.
+      if (manualPlanNeedsReview(existing, forecastState) && forecastVersion !== undefined) {
+        const confirmed = await ReplenishmentPlan.findOneAndUpdate(filter, { $set: { basedOnForecastVersion: forecastVersion, updatedBy: updatedBy || existing.updatedBy || "" } }, { new: true }).lean();
+        return { ...confirmed, confirmed: true };
+      }
+      return { ...existing, unchanged: true };
+    }
+  } else if (!filter.depotId) {
+    const autoPlan = await liveAutoPlan({ materialNo, financialYear, quarter });
+    if (autoPlan && isSameAllocation(autoPlan.distribution, entries)) {
+      return {
+        ...filter,
+        requiredStock: autoPlan.requiredStock,
+        distributionMode: "AUTO_FORECAST",
+        distribution: autoPlan.distribution,
+        unchanged: true,
+      };
+    }
+  }
+
   const update = {
     requiredStock,
     distributionMode: "MANUAL",
     distribution: entries,
     updatedBy: updatedBy || "",
+    ...(forecastVersion !== undefined ? { basedOnForecastVersion: forecastVersion } : {}),
   };
   const doc = await ReplenishmentPlan.findOneAndUpdate(filter, update, { upsert: true, new: true, setDefaultsOnInsert: true }).lean();
   return doc;
+}
+
+/**
+ * The live AUTO_FORECAST plan for one material's working quarter, exactly as
+ * the planning view computes it (never persisted). Null when the requested
+ * FY/quarter is not the live working quarter or no computed plan exists.
+ */
+async function liveAutoPlan({ materialNo, financialYear, quarter }) {
+  const view = await buildPlanningView({ search: materialNo });
+  if (view.activeFY.label !== financialYear || view.workingQuarter !== quarter) return null;
+  const row = view.data.find((r) => String(r.materialNo).trim().toUpperCase() === String(materialNo).trim().toUpperCase());
+  const plan = row?.autoReplenishmentPlan;
+  return plan?.state === "computed" && plan.distribution.length ? plan : null;
 }
 
 /**
@@ -848,6 +920,8 @@ async function applyToAllReplenishmentPlan({ financialYear, distribution, update
   const percentages = distribution.map((d) => d.percentage);
   const monthNames = distribution.map((d) => d.month);
 
+  const applyForecastState = await readForecastState();
+
   // Iterate through all applicable materials.
   for (const m of materials) {
     const key = m.materialNo;
@@ -892,6 +966,7 @@ async function applyToAllReplenishmentPlan({ financialYear, distribution, update
         distributionMode: "MANUAL",
         distribution: entries,
         updatedBy: updatedBy || "",
+        ...(Number.isInteger(applyForecastState?.version) ? { basedOnForecastVersion: applyForecastState.version } : {}),
       };
       await ReplenishmentPlan.findOneAndUpdate(filter, update, { upsert: true, new: true, setDefaultsOnInsert: true });
       savedCount++;

@@ -52,6 +52,10 @@ const forecastPredictionSchema = new mongoose.Schema(
     seasonality: { type: String },
     seasonalityPeakQuarter: { type: String },
     reason: { type: String },
+    // Traceability (optional; absent on predictions stored before automatic
+    // regeneration): the forecast generation and the Sales version it used.
+    forecastVersion: { type: Number },
+    sourceSalesVersion: { type: Number },
 
     // Rolling multi-year metadata — records how many total months the
     // generation request targeted (e.g. 36), so the frontend and

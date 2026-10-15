@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import DistributionOverview from "../components/distribution/DistributionOverview";
 import DistributionRecommendations from "../components/distribution/DistributionRecommendations";
@@ -9,16 +9,25 @@ import TransferDrawer from "../components/distribution/TransferDrawer";
 import { ErrorBanner, TabButton, describeError, num } from "../components/distribution/shared";
 import { fetchDepots } from "../services/depotService";
 import { fetchMaterials } from "../services/materialService";
+import useDerivedStatus, { FreshnessNote } from "../components/useDerivedStatus";
 import {
   countRecommendations, countTransfers, fetchPlantMappings, fetchRecommendations, fetchTransferByTransferId, generateRecommendations,
 } from "../services/distributionService";
+
+// Everything Distribution shows is derived from these — when any changes on the
+// server (automatic recommendation run, stock movement, imports…), refresh quietly.
+const distributionSignature = (s) => [
+  s.distribution.version, s.forecast.version,
+  s.sources.stock, s.sources.materials, s.sources.depots, s.sources.depotPlantMapping, s.sources.depotSafetyStock, s.sources.transfers,
+].join("|");
 
 /**
  * Distribution Master — operational control centre for moving surplus stock
  * between depots. Admin-only (route guard + backend requireRole).
  *
- *   Header            Refresh (re-reads lists + recalculates the network analysis) ·
- *                     Generate Recommendations (creates actionable recommendation records)
+ *   Header            automatic-update status · Regenerate Recommendations (a manual
+ *                     force-run; recommendations normally update automatically when
+ *                     stock, forecasts, safety stock or depot mappings change)
  *   Overview          permanent KPI summary — always visible, never a tab
  *   Workspace tabs:
  *     Network Analysis   where inventory is needed and how much the depot network can solve
@@ -26,7 +35,11 @@ import {
  *     Transfers          the transfer lifecycle (approve → dispatch → in transit → receive / cancel)
  *
  * The page only reads and calls existing endpoints — inventory is changed
- * exclusively by the server at dispatch and receipt.
+ * exclusively by the server at dispatch and receipt. It stays current on its
+ * own: after every action, and whenever the server reports an automatic update
+ * (useDerivedStatus — checked only while the tab is visible). Refreshes are
+ * quiet: the active tab, search, filters, sorting, page, open drawers and
+ * in-progress forms are left as they are.
  */
 export default function DistributionMaster() {
   const [tab, setTab] = useState("analysis");
@@ -43,7 +56,6 @@ export default function DistributionMaster() {
   const [analysis, setAnalysis] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState(null);
-  const [analysisStale, setAnalysisStale] = useState(false);
 
   const [recId, setRecId] = useState(null);
   const [transferDrawerId, setTransferDrawerId] = useState(null);
@@ -54,22 +66,34 @@ export default function DistributionMaster() {
   const [generateResult, setGenerateResult] = useState(null);
   const [generateError, setGenerateError] = useState(null);
 
+  // Quiet refreshes that failed are retried at the next status check, and every
+  // loader ignores a response that a newer request of its own has superseded.
+  const failed = useRef(new Set());
+  const refSeq = useRef(0);
+  const statsSeq = useRef(0);
+
   const loadReference = useCallback(async () => {
+    const seq = ++refSeq.current;
     setRefError(null);
     try {
       const [depots, mappings, materials] = await Promise.all([fetchDepots({ limit: 500 }), fetchPlantMappings(), fetchAllMaterials()]);
+      if (seq !== refSeq.current) return;
+      failed.current.delete("reference");
       setDepotNames(Object.fromEntries(depots.data.map((d) => [d.depotId, d.depotName])));
       setMaterialNames(Object.fromEntries(materials.map((m) => [m.materialNo, m.description])));
       const plants = {};
       mappings.filter((m) => m.isActive).forEach((m) => { (plants[m.depotId] = plants[m.depotId] || []).push(m.plantName); });
       setPlantsByDepot(plants);
     } catch (err) {
+      if (seq !== refSeq.current) return;
+      failed.current.add("reference");
       setRefError(describeError(err, "Could not load depots and plant mappings."));
     }
   }, []);
 
-  const loadStats = useCallback(async () => {
-    setStatsError(null);
+  const loadStats = useCallback(async ({ silent = false } = {}) => {
+    const seq = ++statsSeq.current;
+    if (!silent) setStatsError(null);
     try {
       const [pendingRecommendations, approvedRecommendations, requested, approvedTransfers, dispatched, inTransit, received, pending, latest] = await Promise.all([
         countRecommendations({ status: "PENDING" }),
@@ -91,6 +115,7 @@ export default function DistributionMaster() {
         ]);
         latestRun = { ...newest, count, pending: pendingInRun };
       }
+      if (seq !== statsSeq.current) return; // a newer refresh superseded this one
       setStats({
         pendingRecommendations,
         approvedRecommendations,
@@ -105,22 +130,48 @@ export default function DistributionMaster() {
         pendingUnitsPartial: pending.pagination.total > pending.data.length,
         latestRun,
       });
+      setStatsError(null);
+      failed.current.delete("stats");
     } catch (err) {
-      setStatsError(describeError(err, "Could not load Distribution figures."));
+      if (seq !== statsSeq.current) return;
+      failed.current.add("stats");
+      if (!silent) setStatsError(describeError(err, "Could not load Distribution figures."));
     }
   }, []);
 
-  /** Live dry-run of the engine: the current network position, nothing saved. */
-  const runAnalysis = useCallback(async () => {
+  /**
+   * Live dry-run of the engine: the current network position, nothing saved.
+   * One at a time, so responses can never arrive out of order. A background
+   * update that arrives while a run is in flight queues exactly one follow-up
+   * run (the in-flight one may predate the change); a duplicate initial load
+   * (StrictMode's dev double-mount) is simply skipped.
+   * silent: a background update — the current figures stay on screen, and a
+   * failure keeps them rather than replacing them with an error.
+   */
+  const analysisInFlight = useRef(false);
+  const analysisQueued = useRef(false);
+  const runAnalysis = useCallback(async ({ silent = false } = {}) => {
+    if (analysisInFlight.current) {
+      if (silent) analysisQueued.current = true;
+      return;
+    }
+    analysisInFlight.current = true;
     setAnalysisLoading(true);
-    setAnalysisError(null);
+    if (!silent) setAnalysisError(null);
     try {
       setAnalysis(await generateRecommendations({ dryRun: true }));
-      setAnalysisStale(false);
+      setAnalysisError(null);
+      failed.current.delete("analysis");
     } catch (err) {
-      setAnalysisError(describeError(err, "The network analysis could not be run."));
+      failed.current.add("analysis");
+      if (!silent) setAnalysisError(describeError(err, "The network analysis could not be run."));
     } finally {
+      analysisInFlight.current = false;
       setAnalysisLoading(false);
+    }
+    if (analysisQueued.current) {
+      analysisQueued.current = false;
+      runAnalysis({ silent: true });
     }
   }, []);
 
@@ -130,18 +181,29 @@ export default function DistributionMaster() {
     runAnalysis();
   }, [loadReference, loadStats, runAnalysis]);
 
-  /** After any write: reload lists and counts; the analysis is marked stale (re-run on demand, no polling). */
+  /** After any action here: lists, Overview and Network Analysis update quietly. */
   const handleChanged = useCallback(() => {
     setReloadToken((t) => t + 1);
-    loadStats();
-    setAnalysisStale(true);
-  }, [loadStats]);
+    loadStats({ silent: true });
+    runAnalysis({ silent: true });
+  }, [loadStats, runAnalysis]);
 
-  function refreshAll() {
-    setReloadToken((t) => t + 1);
-    loadStats();
-    runAnalysis();
-  }
+  // Automatic updates made on the server (new recommendation run, stock moved,
+  // imports, mapping/safety-stock changes) — refresh quietly when they land.
+  const { status: derivedStatus, check: checkDerived, tick: statusTick } = useDerivedStatus({
+    signature: distributionSignature,
+    onChange: () => {
+      loadReference();
+      handleChanged();
+    },
+  });
+
+  // Retry any quiet refresh that failed (lists retry themselves on the same tick).
+  useEffect(() => {
+    if (failed.current.has("reference")) loadReference();
+    if (failed.current.has("stats")) loadStats({ silent: true });
+    if (failed.current.has("analysis")) runAnalysis({ silent: true });
+  }, [statusTick, loadReference, loadStats, runAnalysis]);
 
   async function openTransfer(id, transferId) {
     setLookupError(null);
@@ -167,6 +229,7 @@ export default function DistributionMaster() {
       const result = await generateRecommendations({});
       setGenerateResult(result);
       handleChanged();
+      checkDerived();
       setTab("recommendations");
     } catch (err) {
       setGenerateError(describeError(err, "Recommendation generation failed."));
@@ -181,11 +244,11 @@ export default function DistributionMaster() {
         <div>
           <h2 className="font-display text-xl font-bold">Distribution Master</h2>
           <p className="text-sm text-gray-500">Admin-only. Rebalance stock between depots — review recommendations, run transfers, and see what redistribution cannot solve.</p>
+          <div className="mt-1"><FreshnessNote stage={derivedStatus?.distribution} noun="recommendations" /></div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button onClick={refreshAll} className="sn-btn-ghost"><RefreshIcon /> Refresh</button>
-          <button onClick={() => setConfirmGenerate(true)} disabled={generating || analysisLoading} className="sn-btn-primary disabled:opacity-60">
-            <SparkIcon /> {generating ? "Generating…" : "Generate Recommendations"}
+          <button onClick={() => setConfirmGenerate(true)} disabled={generating} className="sn-btn-ghost disabled:opacity-60">
+            <SparkIcon /> {generating ? "Regenerating…" : "Regenerate Recommendations"}
           </button>
         </div>
       </div>
@@ -213,7 +276,6 @@ export default function DistributionMaster() {
             onRun={runAnalysis}
             depotNames={depotNames}
             materialNames={materialNames}
-            stale={analysisStale}
           />
         )}
         {tab === "recommendations" && (
@@ -223,11 +285,13 @@ export default function DistributionMaster() {
             latestRunId={stats?.latestRun?.generationRunId}
             latestRunAt={stats?.latestRun?.generatedAt}
             reloadToken={reloadToken}
+            retryTick={statusTick}
             onOpen={setRecId}
+            onChanged={handleChanged}
           />
         )}
         {tab === "transfers" && (
-          <DistributionTransfers depotNames={depotNames} materialNames={materialNames} reloadToken={reloadToken} onOpen={(id) => setTransferDrawerId(id)} />
+          <DistributionTransfers depotNames={depotNames} materialNames={materialNames} reloadToken={reloadToken} retryTick={statusTick} onOpen={(id) => setTransferDrawerId(id)} />
         )}
       </section>
 
@@ -252,12 +316,12 @@ export default function DistributionMaster() {
       />
       <ConfirmDialog
         open={confirmGenerate}
-        title="Generate distribution recommendations?"
+        title="Regenerate recommendations now?"
         message={
-          "Runs the engine for the current forecast period using live stock in hand, depot safety stock and forecasts.\n\n" +
-          "• New PENDING recommendations are created.\n• Earlier PENDING recommendations for re-evaluated routes become SUPERSEDED (kept for history).\n• Approved and rejected recommendations are not touched.\n• No stock moves."
+          "Recommendations already update automatically when stock, forecasts, safety stock or depot mappings change. Use this only to force a fresh run now, using live stock in hand, depot safety stock and forecasts.\n\n" +
+          "• New PENDING recommendations are created.\n• Earlier pending recommendations for re-evaluated routes are cleared from the review list.\n• Approved and rejected recommendations are not touched.\n• No stock moves."
         }
-        confirmLabel="Generate"
+        confirmLabel="Regenerate"
         onConfirm={handleGenerate}
         onCancel={() => setConfirmGenerate(false)}
       />
@@ -280,10 +344,10 @@ function GenerationSummary({ result, onDismiss }) {
     <div className="rounded-lg border border-healthy/30 bg-healthy/5 px-4 py-3 text-sm text-[#14532D]">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-semibold">Generation run complete — <span className="font-mono text-xs">{result.generationRunId}</span></div>
+          <div className="font-semibold">Recommendations regenerated</div>
           <div className="mt-0.5">
             {num(result.recommendationsCreated)} recommendations created ({num(result.totalRecommendedQuantity)} units) from {num(result.materialsEvaluated)} materials ·{" "}
-            {num(result.sourcePositions.length)} surplus / {num(result.destinationPositions.length)} short positions · {num(result.supersededCount)} superseded ·{" "}
+            {num(result.sourcePositions.length)} surplus / {num(result.destinationPositions.length)} short positions ·{" "}
             {num(filtered)} below the minimum transfer quantity · {num(result.unfulfilledShortages.length)} shortages need Planning
             {result.skipped.length > 0 && <> · {num(result.skipped.length)} positions skipped (data quality)</>}.
           </div>
@@ -291,14 +355,6 @@ function GenerationSummary({ result, onDismiss }) {
         <button onClick={onDismiss} className="shrink-0 text-xs font-semibold hover:underline">Dismiss</button>
       </div>
     </div>
-  );
-}
-
-function RefreshIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-    </svg>
   );
 }
 

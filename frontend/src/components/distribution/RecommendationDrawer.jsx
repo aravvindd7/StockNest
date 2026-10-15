@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { approveRecommendation, fetchRecommendation, rejectRecommendation } from "../../services/distributionService";
 import {
   DepotIdentity, Drawer, ErrorBanner, Field, KV, MaterialIdentity, PriorityBadge, RouteSections, SectionTitle, StatusBadge, dateTime, describeError,
-  forecastPeriodLabel, nameOr, num, useSubmission,
+  destinationSnapshotRows, forecastPeriodLabel, nameOr, num, sourceSnapshotRows, useSubmission,
 } from "./shared";
 
 /**
@@ -21,13 +21,18 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
   const [createdTransfer, setCreatedTransfer] = useState(null);
   const submission = useSubmission();
 
+  // A response for an earlier request (another record, or a reload overtaken
+  // by a newer one) must never replace what the drawer now shows.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
     if (!recommendationId) return;
+    const seq = ++loadSeq.current;
     setLoadError(null);
     try {
-      setRec(await fetchRecommendation(recommendationId));
+      const data = await fetchRecommendation(recommendationId);
+      if (seq === loadSeq.current) setRec(data);
     } catch (err) {
-      setLoadError(describeError(err, "Could not load this recommendation."));
+      if (seq === loadSeq.current) setLoadError(describeError(err, "Could not load this recommendation."));
     }
   }, [recommendationId]);
 
@@ -163,23 +168,14 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
               <KV rows={[
                 ["Depot", depotLabel(rec.sourceDepotId)],
                 ["Plant (current mapping)", plantLabel(rec.sourceDepotId)],
-                ["Total Stock", num(rec.sourceCurrentStock)],
-                ["Stock In Hand (SIH)", num(rec.sourceStockInHand)],
-                rec.sourceOpenCommitments ? ["Open Commitments", num(rec.sourceOpenCommitments)] : null,
-                ["Safety Stock", num(rec.sourceSafetyStock)],
-                ["Forecast Demand", num(rec.sourceForecastDemand)],
-                ["Transferable Surplus", num(rec.sourceSurplus), "text-healthy"],
+                ...sourceSnapshotRows(rec),
               ]} />
             }
             destination={
               <KV rows={[
                 ["Depot", depotLabel(rec.destinationDepotId)],
                 ["Plant (current mapping)", plantLabel(rec.destinationDepotId)],
-                ["Current Stock", num(rec.destinationCurrentStock)],
-                rec.destinationOpenInbound ? ["Open Inbound", num(rec.destinationOpenInbound)] : null,
-                ["Safety Stock", num(rec.destinationSafetyStock)],
-                ["Forecast Demand", num(rec.destinationForecastDemand)],
-                ["Shortage", num(rec.destinationShortage), "text-out"],
+                ...destinationSnapshotRows(rec),
               ]} />
             }
           />
@@ -256,13 +252,6 @@ function StatusNote({ rec, onOpenTransfer }) {
     return (
       <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
         Rejected by {rec.reviewedBy} on {dateTime(rec.reviewedAt)}: “{rec.reviewNotes}”
-      </div>
-    );
-  }
-  if (rec.status === "SUPERSEDED") {
-    return (
-      <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-500">
-        Superseded by run <span className="font-mono text-xs">{rec.supersededByRunId}</span> on {dateTime(rec.supersededAt)}. Kept for history; it can no longer be reviewed.
       </div>
     );
   }

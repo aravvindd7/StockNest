@@ -13,6 +13,7 @@ const salesRoutes = require("./routes/salesRoutes");
 const planningRoutes = require("./routes/planningRoutes");
 const forecastRoutes = require("./routes/forecastRoutes");
 const distributionRoutes = require("./routes/distributionRoutes");
+const derivedRoutes = require("./routes/derivedRoutes");
 
 const app = express();
 
@@ -44,6 +45,8 @@ app.use("/api/planning", planningRoutes);
 app.use("/api/forecast", forecastRoutes);
 // Distribution Master — Stage 1 read-only foundation (Admin only).
 app.use("/api/distribution", distributionRoutes);
+// Freshness of the automatically maintained forecast / recommendations.
+app.use("/api/derived-status", derivedRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {
@@ -89,6 +92,18 @@ async function start() {
       : `[transactions] MongoDB transactions UNAVAILABLE (${transactionStatus().lastError}) — Distribution stock movement endpoints will return 503.`);
   } catch (err) {
     console.error("[transactions] Capability check failed (movement endpoints will return 503):", err.message);
+  }
+
+  // Automatic forecast & recommendation updates after source-data changes
+  // (services/derivedDataPipeline.js). First start adopts the existing
+  // results as the baseline — nothing is regenerated until data changes.
+  // DERIVED_AUTO_UPDATE=false disables it (manual Regenerate actions remain).
+  if (process.env.DERIVED_AUTO_UPDATE !== "false") {
+    try {
+      await require("./services/derivedDataPipeline").start();
+    } catch (err) {
+      console.error("[derived] automatic updates could not start (manual Regenerate actions still work):", err.message);
+    }
   }
 
   app.listen(PORT, () => {

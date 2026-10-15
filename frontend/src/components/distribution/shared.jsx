@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { newIdempotencyKey } from "../../services/distributionService";
 
 /**
@@ -18,8 +18,11 @@ export const dateTime = (d) =>
 const FY_MONTHS = ["April", "May", "June", "July", "August", "September", "October", "November", "December", "January", "February", "March"];
 const SHORT = (m) => m.slice(0, 3);
 
-/** { financialYear: "2026-27", startMonth: "October", horizonMonths: 3 } → "Oct – Dec 2026 · FY 2026-27" */
-export function forecastPeriodLabel(fp) {
+/**
+ * { financialYear: "2026-27", startMonth: "October", horizonMonths: 3 } → "Oct 2026 – Dec 2026 · FY 2026-27"
+ * (withFY: false → "Oct 2026 – Dec 2026").
+ */
+export function forecastPeriodLabel(fp, { withFY = true } = {}) {
   if (!fp?.financialYear || !fp.startMonth) return "—";
   const fyStart = parseInt(fp.financialYear.slice(0, 4), 10);
   const startIdx = FY_MONTHS.indexOf(fp.startMonth);
@@ -28,7 +31,8 @@ export function forecastPeriodLabel(fp) {
   const endIdx = startIdx + Math.max(1, fp.horizonMonths || 1) - 1;
   const start = `${SHORT(FY_MONTHS[startIdx % 12])} ${calYear(startIdx)}`;
   const end = `${SHORT(FY_MONTHS[endIdx % 12])} ${calYear(endIdx)}`;
-  return `${start === end ? start : `${start} – ${end}`} · FY ${fp.financialYear}`;
+  const range = start === end ? start : `${start} – ${end}`;
+  return withFY ? `${range} · FY ${fp.financialYear}` : range;
 }
 
 // ─── Badges ──────────────────────────────────────────────────────────────────
@@ -209,8 +213,97 @@ export function RouteSections({ source, destination }) {
   );
 }
 
+/**
+ * Snapshot rows recorded on a recommendation by the engine at generation time
+ * (never recalculated). Shared by the Recommendation and Transfer drawers so
+ * both show exactly the same figures and labels.
+ */
+export const sourceSnapshotRows = (rec) => [
+  ["Total Stock", num(rec.sourceCurrentStock)],
+  ["Stock In Hand (SIH)", num(rec.sourceStockInHand)],
+  rec.sourceOpenCommitments ? ["Open Commitments", num(rec.sourceOpenCommitments)] : null,
+  ["Safety Stock", num(rec.sourceSafetyStock)],
+  ["Forecast Demand", num(rec.sourceForecastDemand)],
+  ["Transferable Surplus", num(rec.sourceSurplus), "text-healthy"],
+];
+export const destinationSnapshotRows = (rec) => [
+  ["Current Stock", num(rec.destinationCurrentStock)],
+  rec.destinationOpenInbound ? ["Open Inbound", num(rec.destinationOpenInbound)] : null,
+  ["Safety Stock", num(rec.destinationSafetyStock)],
+  ["Forecast Demand", num(rec.destinationForecastDemand)],
+  ["Shortage", num(rec.destinationShortage), "text-out"],
+];
+
 /** "Chennai" (name) or the ID when no name is known — for plain-text places such as drawer subtitles. */
 export const nameOr = (map, id) => (map?.[id] ? map[id] : id);
+
+/**
+ * Small ⓘ information popover — same interaction pattern as the table column
+ * filter popup: click/tap (or Enter/Space) toggles it; clicking outside or
+ * pressing Escape closes it (Escape returns focus to the icon). Never hover-only.
+ * The popup is positioned against the nearest `relative` ancestor, so the
+ * caller decides where it opens and it stays within that block's width.
+ */
+export function InfoPopover({ label, title, children }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const buttonRef = useRef(null);
+  const id = useId();
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointer = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("touchstart", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("touchstart", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <span ref={wrapRef} className="inline-flex align-middle">
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-label={label}
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen((o) => !o)}
+        className={`ml-1 inline-flex h-5 w-5 items-center justify-center rounded-full transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
+          open ? "text-primary" : "text-gray-400 hover:text-primary"
+        }`}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path strokeLinecap="round" d="M12 11v5" />
+          <circle cx="12" cy="7.75" r="0.6" fill="currentColor" />
+        </svg>
+      </button>
+      {open && (
+        <span
+          id={id}
+          role="region"
+          aria-label={title}
+          className="absolute left-0 top-full z-20 mt-1 block w-full max-w-sm rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-left shadow-lg"
+        >
+          <span className="block text-[13px] font-semibold text-[#1B2338]">{title}</span>
+          <span className="mt-0.5 block text-[13px] leading-snug text-gray-600">{children}</span>
+        </span>
+      )}
+    </span>
+  );
+}
 
 export function SectionTitle({ children, aside }) {
   return (

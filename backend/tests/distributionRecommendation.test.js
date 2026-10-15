@@ -590,14 +590,18 @@ test("empty dataset: no materials → nothing evaluated, flagged; no forecast wi
   await assert.rejects(run(), (e) => e.status === 422 && /No forecast window/.test(e.message));
 });
 
-test("horizon longer than the forecast window → 422; concurrent runs → 409", async (t) => {
+test("horizon longer than the forecast window → 422; concurrent writing runs → 409; dry runs never blocked", async (t) => {
   mockWorld(t, { positions: WORLD });
   memoryStore(t);
   await assert.rejects(run({ horizonMonths: 6 }), (e) => e.status === 422 && /exceeds the current forecast window \(3 months\)/.test(e.message));
-  const [a, b] = await Promise.allSettled([run({ dryRun: true }), run({ dryRun: true })]);
+  // Two writing runs: one wins, the other is refused (single-run protection).
+  const [a, b] = await Promise.allSettled([run({}), run({})]);
   assert.equal(a.status, "fulfilled");
   assert.equal(b.status, "rejected");
   assert.equal(b.reason.status, 409);
+  // A dry run (Network Analysis) only reads: it runs alongside a writing run and alongside other dry runs.
+  const [w, d1, d2] = await Promise.allSettled([run({}), run({ dryRun: true }), run({ dryRun: true })]);
+  assert.deepEqual([w.status, d1.status, d2.status], ["fulfilled", "fulfilled", "fulfilled"]);
 });
 
 // ─── Request validation ──────────────────────────────────────────────────────
@@ -811,4 +815,33 @@ test("min transfer: one leftover source surplus filtered against several destina
   assert.deepEqual(r.filteredRecommendations.map((f) => [f.sourceDepotId, f.destinationDepotId, f.sourceRemainingSurplus]), [["D1", "D3", 6]]);
   assert.ok(store.every((d) => !("sourceRemainingSurplus" in d)));
   assert.equal(DistributionRecommendation.schema.path("sourceRemainingSurplus"), undefined, "not part of the persisted model");
+});
+
+// ─── Automatic runs (services/derivedDataPipeline.js) ────────────────────────
+
+test("automatic run: PENDING only, inputs stamped, previous PENDING superseded, APPROVED/REJECTED untouched, no transfers", async (t) => {
+  mockWorld(t, { positions: WORLD });
+  const period = { financialYear: "2026-27", startMonth: "October", horizonMonths: 3 };
+  const reviewed = { materialNo: "MAT1", sourceDepotId: "D1", forecastPeriod: period, recommendedQuantity: 10, priority: "HIGH", reason: "r", generationRunId: "DRUN-OLD" };
+  const { store } = memoryStore(t, [
+    { ...reviewed, destinationDepotId: "D2", status: "APPROVED", approvedQuantity: 10, transferId: "TRF-000001" },
+    { ...reviewed, destinationDepotId: "D3", status: "REJECTED", reviewNotes: "no" },
+  ]);
+  const transferCreate = t.mock.method(DistributionTransfer, "create", async () => { throw new Error("must not be called"); });
+  const { AUTOMATIC_USER } = require("../services/derivedDataPipeline");
+  const inputVersions = { stock: 4, materials: 1, depots: 0, depotPlantMapping: 2, depotSafetyStock: 1, transfers: 3, forecast: 7 };
+
+  const first = await engine.generateRecommendations({}, { now: NOW, user: AUTOMATIC_USER, sourceVersions: inputVersions });
+  const created = store.filter((d) => d.generationRunId === first.generationRunId);
+  assert.ok(created.length > 0);
+  created.forEach((d) => {
+    assert.equal(d.status, "PENDING", "never approved automatically");
+    assert.equal(d.generatedBy, AUTOMATIC_USER);
+    assert.deepEqual(d.inputVersions, inputVersions, "traceable to the inputs it used");
+  });
+
+  const second = await engine.generateRecommendations({}, { now: NOW, user: AUTOMATIC_USER, sourceVersions: { ...inputVersions, stock: 5 } });
+  assert.ok(store.filter((d) => d.generationRunId === first.generationRunId).every((d) => d.status === "SUPERSEDED" && d.supersededByRunId === second.generationRunId));
+  assert.deepEqual(store.filter((d) => d.generationRunId === "DRUN-OLD").map((d) => d.status).sort(), ["APPROVED", "REJECTED"], "reviewed history untouched");
+  assert.equal(transferCreate.mock.callCount(), 0, "no transfer is ever created by generation");
 });

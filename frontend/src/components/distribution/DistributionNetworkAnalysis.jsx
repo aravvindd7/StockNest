@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import DataTable from "../DataTable";
 import { SearchIcon } from "./DistributionRecommendations";
-import { DepotIdentity, ErrorBanner, MaterialIdentity, StatTile, ToSeparator, dateTime, forecastPeriodLabel, num } from "./shared";
+import { DepotIdentity, ErrorBanner, InfoPopover, MaterialIdentity, StatTile, ToSeparator, dateTime, forecastPeriodLabel, num } from "./shared";
 
 /**
  * Network Analysis — "Where is inventory needed, and how much of that need can
@@ -10,7 +10,8 @@ import { DepotIdentity, ErrorBanner, MaterialIdentity, StatTile, ToSeparator, da
  * current computation of stock, safety stock, forecast demand, open inbound,
  * shortage and source opportunities — nothing saved. There is no persisted
  * analysis endpoint, so this view reflects the moment the analysis last ran
- * (on page load and on the header's Refresh).
+ * (on page load, after every Distribution action, and whenever the server
+ * reports an automatic update — no manual refresh).
  *
  * For every destination short of stock it separates:
  *   covered    — shortage the engine can fill by moving surplus between depots
@@ -54,7 +55,7 @@ function groupFiltered(filtered) {
   return [...groups.values()];
 }
 
-export default function DistributionNetworkAnalysis({ analysis, loading, error, onRun, depotNames, materialNames, stale }) {
+export default function DistributionNetworkAnalysis({ analysis, loading, error, onRun, depotNames, materialNames }) {
   const [search, setSearch] = useState("");
   const [klass, setKlass] = useState("all");
 
@@ -84,18 +85,20 @@ export default function DistributionNetworkAnalysis({ analysis, loading, error, 
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="sn-card px-4 py-3 text-sm text-gray-600">
-        {analysis ? (
-          <>
-            <b>Live network analysis</b> for {forecastPeriodLabel(analysis.forecastPeriod)} · computed {dateTime(analysis.generatedAt)} ·{" "}
-            <span className="text-gray-400">dry run — nothing saved, no recommendations created. Refresh recalculates it.</span>
-          </>
-        ) : loading ? (
-          "Analysing the network…"
-        ) : (
-          "The network analysis has not run yet — use Refresh."
-        )}
-        {stale && analysis && <span className="ml-2 font-semibold text-[#B45309]">Stock or transfers changed since — use Refresh to recalculate.</span>}
+      <div className="relative flex flex-col gap-1 px-1">
+        <p className="text-sm text-[#1B2338]">
+          See where stock is short, where extra stock is available, and how much can be covered by moving stock between depots.
+          <InfoPopover label="About Network Analysis" title="Preview only">
+            Network Analysis is a planning view. It does not change stock or create transfers.
+          </InfoPopover>
+        </p>
+        <p className="flex flex-wrap gap-x-4 gap-y-0.5 text-[13px] text-gray-500">
+          {analysis && (
+            <span title={`Last updated ${dateTime(analysis.generatedAt)}`}>
+              Forecast period: <span className="font-semibold text-gray-700">{forecastPeriodLabel(analysis.forecastPeriod, { withFY: false })}</span>
+            </span>
+          )}
+        </p>
       </div>
 
       <ErrorBanner error={error} onRetry={onRun} />

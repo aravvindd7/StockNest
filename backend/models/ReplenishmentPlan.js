@@ -43,6 +43,10 @@ const replenishmentPlanSchema = new mongoose.Schema(
     // stored, so it can be refreshed when the forecast regenerates).
     distributionMode: { type: String, enum: ["AUTO_FORECAST", "MANUAL"], default: "MANUAL" },
     distribution: { type: [distributionEntrySchema], required: true },
+    // The forecast generation (DerivedDataState "forecast".version) current when
+    // the planner saved this plan. A newer forecast never overwrites the plan;
+    // it only flags it for review. Absent on plans saved before this existed.
+    basedOnForecastVersion: { type: Number },
     updatedBy: { type: String, trim: true },
   },
   { timestamps: true }

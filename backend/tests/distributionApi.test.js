@@ -192,7 +192,7 @@ test("recommendation/transfer write routes are exactly generation + the Stage 4 
     .map((l) => ({ route: `${Object.keys(l.route.methods).join(",")} ${l.route.path}`, handles: l.route.stack.map((x) => x.handle) }));
   assert.deepEqual(writes.map((w) => w.route), [
     "post /recommendations/generate",
-    "post /recommendations/:id/approve", "post /recommendations/:id/reject",
+    "post /recommendations/:id/approve", "post /recommendations/:id/reject", "post /recommendations/approve-bulk",
     "post /transfers", "post /transfers/:id/approve", "post /transfers/:id/dispatch",
     "post /transfers/:id/in-transit", "post /transfers/:id/receive", "post /transfers/:id/cancel",
   ]);

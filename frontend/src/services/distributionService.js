@@ -36,6 +36,16 @@ export async function fetchRecommendations(params) {
   return data;
 }
 
+/**
+ * GET /distribution/recommendations/pending-summary → PENDING recommendations
+ * per priority: { priorities: [{ priority, count, units, recommendations: [{ id, version }] }], total }.
+ * Independent of any table filter.
+ */
+export async function fetchPendingRecommendationSummary() {
+  const { data } = await api.get("/distribution/recommendations/pending-summary");
+  return data;
+}
+
 /** GET /distribution/recommendations/:id → recommendation */
 export async function fetchRecommendation(id) {
   const { data } = await api.get(`/distribution/recommendations/${id}`);
@@ -98,6 +108,16 @@ export async function generateRecommendations(options = {}) {
 // ─── Stage 4 writes (Idempotency-Key required) ───────────────────────────────
 
 /** POST /recommendations/:id/approve { approvedQuantity?, reviewNotes?, expectedVersion? } → { recommendation, transfer } */
+/**
+ * POST /distribution/recommendations/approve-bulk — approves the reviewed
+ * PENDING recommendations of the chosen priorities at their recommended
+ * quantities. body: { priorities, recommendations: [{ id, version }] }.
+ */
+export async function approveRecommendationsBulk(body, key) {
+  const { data } = await api.post("/distribution/recommendations/approve-bulk", body, withKey(key));
+  return data;
+}
+
 export async function approveRecommendation(id, body, key) {
   const { data } = await api.post(`/distribution/recommendations/${id}/approve`, body, withKey(key));
   return data;
@@ -127,7 +147,7 @@ export async function transferAction(id, action, body, key) {
 
 const STATIC_OPTIONS = {
   priority: ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
-  recommendationStatus: ["PENDING", "APPROVED", "REJECTED", "SUPERSEDED"],
+  recommendationStatus: ["PENDING", "APPROVED", "REJECTED"],
   transferStatus: ["REQUESTED", "APPROVED", "DISPATCHED", "IN_TRANSIT", "RECEIVED", "CANCELLED"],
 };
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import PlanningTable from "../components/PlanningTable";
 import ForecastDrawer from "../components/ForecastDrawer";
 import PlanDetailsDrawer from "../components/PlanDetailsDrawer";
@@ -6,6 +6,11 @@ import ReplenishmentDetailsDrawer from "../components/ReplenishmentDetailsDrawer
 import FilterManager from "../components/table/FilterManager";
 import { useTableFilters } from "../components/table/useTableFilters";
 import { fetchPlanningComparison, regenerateForecast, exportPlanningXlsx } from "../services/planningService";
+import useDerivedStatus, { FreshnessNote } from "../components/useDerivedStatus";
+
+// The planning view is computed from Sales, Stock, Materials and the stored
+// forecast — reload it (quietly) whenever any of them changes.
+const planningSignature = (s) => [s.sources.sales, s.sources.stock, s.sources.materials, s.forecast.version].join("|");
 
 // Planning Master's filters are the "intelligent" kind (Trend, Growth %,
 // Forecast Confidence, Stock Risk) — there's no natural per-column icon
@@ -65,11 +70,26 @@ export default function PlanningMaster() {
   const [regenerating, setRegenerating] = useState(false);
   const [exporting, setExporting] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  /**
+   * silent: a background refresh after an automatic update — keeps the table,
+   * search, filters, FY and any open drawer as they are, and on failure keeps
+   * the rows already shown.
+   */
+  // Only the newest request may update the view (e.g. a search typed while a
+  // quiet refresh is in flight); a failed quiet refresh is retried at the next
+  // automatic status check.
+  const loadSeq = useRef(0);
+  const loadFailed = useRef(false);
+  const load = useCallback(async ({ silent = false } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const result = await fetchPlanningComparison({ ...filterState.queryParams });
+      if (seq !== loadSeq.current) return;
+      loadFailed.current = false;
       setGroups(result.groups);
       setRows(result.data);
       setTimeline({
@@ -81,12 +101,25 @@ export default function PlanningMaster() {
         currentQuarter: result.currentQuarter,
       });
     } catch (err) {
-      setError(err.response?.data?.message || "Could not load the planning view. Is the backend running?");
+      if (seq !== loadSeq.current) return;
+      loadFailed.current = true;
+      if (!silent) setError(err.response?.data?.message || "Could not load the planning view. Is the backend running?");
     } finally {
-      setLoading(false);
+      if (!silent && seq === loadSeq.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterState.queryParams]);
+
+  // Automatic updates: when Sales/Stock/Materials change or a new forecast is
+  // generated on the server, reload quietly — no manual "Generate Forecast" needed.
+  const { status: derivedStatus, check: checkDerived, tick: statusTick } = useDerivedStatus({
+    signature: planningSignature,
+    onChange: () => load({ silent: true }),
+  });
+  useEffect(() => {
+    if (loadFailed.current) load({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusTick]);
 
   useEffect(() => {
     const t = setTimeout(load, 300);
@@ -98,7 +131,8 @@ export default function PlanningMaster() {
     setError(null);
     try {
       await regenerateForecast();
-      await load();
+      await load({ silent: true });
+      checkDerived();
     } catch (err) {
       setError(err.response?.data?.message || "Regeneration failed. Is the ML service running?");
     } finally {
@@ -174,6 +208,7 @@ export default function PlanningMaster() {
             with future months' existing forecast. Click an actual quarter for monthly sales, a forecast quarter for
             forecast details, or a PLAN cell for the working-quarter plan.
           </p>
+          <div className="mt-1"><FreshnessNote stage={derivedStatus?.forecast} noun="forecast" /></div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -275,7 +310,7 @@ export default function PlanningMaster() {
       <ReplenishmentDetailsDrawer
         open={Boolean(replenishTarget)}
         onClose={() => setReplenishTarget(null)}
-        row={replenishTarget}
+        row={(replenishTarget && rows.find((r) => r.materialNo === replenishTarget.materialNo)) || replenishTarget}
         activeFY={timeline?.activeFY}
         workingQuarter={timeline?.workingQuarter}
         onSave={handleReplenishmentSaved}

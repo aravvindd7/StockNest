@@ -2,6 +2,9 @@ const mongoose = require("mongoose");
 const service = require("../services/distributionTransferService");
 const { executeIdempotent } = require("../middleware/idempotency");
 const { DistributionError } = require("../utils/transactions");
+const { PRIORITY_VALUES } = require("../models/DistributionRecommendation");
+
+const BULK_APPROVAL_LIMIT = 500;
 
 /**
  * Distribution Stage 4 HTTP layer — recommendation review and the transfer
@@ -14,10 +17,30 @@ const { DistributionError } = require("../utils/transactions");
 const FIELD = {
   int: (min) => ({ type: "int", min }),
   str: () => ({ type: "string" }),
+  // Non-empty list; `item` returns { value } or { error }, `normalize` checks/orders the whole list.
+  list: (item, { max, normalize }) => ({ type: "list", item, max, normalize }),
 };
+
+const priorityItem = (v) => (typeof v === "string" && PRIORITY_VALUES.includes(v.trim().toUpperCase())
+  ? { value: v.trim().toUpperCase() }
+  : { error: `must be one of ${PRIORITY_VALUES.join(", ")}` });
+const versionedIdItem = (v) => {
+  const ok = v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).every((k) => k === "id" || k === "version")
+    && typeof v.id === "string" && mongoose.Types.ObjectId.isValid(v.id) && Number.isInteger(v.version) && v.version >= 0;
+  return ok ? { value: { id: v.id, version: v.version } } : { error: "must be { id: <recommendation id>, version: <whole number ≥ 0> }" };
+};
+// Canonical order so the same selection always hashes to the same idempotent request.
+const uniquePriorities = (list) => ({ value: PRIORITY_VALUES.filter((p) => list.includes(p)) });
+const uniqueIds = (list) => (new Set(list.map((r) => r.id)).size !== list.length
+  ? { error: "contains the same recommendation more than once" }
+  : { value: [...list].sort((a, b) => a.id.localeCompare(b.id)) });
 const SCHEMAS = {
   approveRecommendation: { approvedQuantity: FIELD.int(1), reviewNotes: FIELD.str(), expectedVersion: FIELD.int(0) },
   rejectRecommendation: { reviewNotes: { ...FIELD.str(), required: true }, expectedVersion: FIELD.int(0) },
+  approveRecommendationsBulk: {
+    priorities: { ...FIELD.list(priorityItem, { max: PRIORITY_VALUES.length, normalize: uniquePriorities }), required: true },
+    recommendations: { ...FIELD.list(versionedIdItem, { max: BULK_APPROVAL_LIMIT, normalize: uniqueIds }), required: true },
+  },
   createTransfer: {
     materialNo: { ...FIELD.str(), required: true },
     sourceDepotId: { ...FIELD.str(), required: true },
@@ -45,6 +68,17 @@ function parseBody(body, schema) {
     if (v === undefined || v === null || (rule.type === "string" && typeof v === "string" && !v.trim())) {
       if (rule.required) errors.push(`${name} is required.`);
       return;
+    }
+    if (rule.type === "list") {
+      if (!Array.isArray(v) || v.length === 0) return errors.push(`${name} must be a non-empty list.`);
+      if (v.length > rule.max) return errors.push(`${name} may contain at most ${rule.max} entries.`);
+      const items = v.map(rule.item);
+      const bad = items.findIndex((r) => r.error);
+      if (bad >= 0) return errors.push(`${name}[${bad}] ${items[bad].error}.`);
+      const normalized = rule.normalize(items.map((r) => r.value));
+      if (normalized.error) return errors.push(`${name} ${normalized.error}.`);
+      values[name] = normalized.value;
+      return undefined;
     }
     if (rule.type === "int") {
       if (!Number.isInteger(v) || v < rule.min) errors.push(`${name} must be a whole number ≥ ${rule.min}.`);
@@ -97,6 +131,9 @@ const approveRecommendation = action("approveRecommendation", {
 const rejectRecommendation = action("rejectRecommendation", {
   schema: "rejectRecommendation", scope: "POST /recommendations/:id/reject", run: (id, v, ctx, s) => service.rejectRecommendation(id, v, ctx, s),
 });
+const approveRecommendationsBulk = action("approveRecommendationsBulk", {
+  schema: "approveRecommendationsBulk", scope: "POST /recommendations/approve-bulk", run: (_id, v, ctx, s) => service.approveRecommendationsBulk(v, ctx, s),
+});
 const createTransfer = action("createTransfer", {
   schema: "createTransfer", scope: "POST /transfers", successStatus: 201, run: (_id, v, ctx, s) => service.createManualTransfer(v, ctx, s),
 });
@@ -128,6 +165,7 @@ async function listTransferMovements(req, res) {
 module.exports = {
   approveRecommendation,
   rejectRecommendation,
+  approveRecommendationsBulk,
   createTransfer,
   approveTransfer,
   dispatchTransfer,

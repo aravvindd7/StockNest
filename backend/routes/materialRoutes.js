@@ -2,6 +2,8 @@ const express = require("express");
 const { requireAuth } = require("../middleware/authMiddleware");
 const { requireRole } = require("../middleware/roleMiddleware");
 const upload = require("../middleware/uploadMiddleware");
+const { recordsSourceChange } = require("../middleware/sourceChange");
+const materialsChanged = recordsSourceChange("materials"); // one event per successful operation → automatic updates
 
 const {
   listMaterials,
@@ -29,7 +31,7 @@ router.use(requireAuth, requireRole("ADMIN"));
 
 // ---- Import history (fixed paths before the ":id" routes below) ----
 router.get("/import-history", getImportHistory);
-router.post("/import-history/:id/view", viewImportHistory); // restore as active
+router.post("/import-history/:id/view", materialsChanged, viewImportHistory); // restore as active
 router.delete("/import-history/:id", removeImportHistory);
 
 // ---- Bulk import: single request, processed directly after upload.
@@ -37,7 +39,7 @@ router.delete("/import-history/:id", removeImportHistory);
 // column-mapping/preview step — the file must have the exact required
 // headers (Material No, Description, Model, STD/Discontinued, Inv Cost,
 // MOQ, FG/RM); rows are validated and imported in one round trip.
-router.post("/import", upload.single("file"), importMaterials);
+router.post("/import", upload.single("file"), materialsChanged, importMaterials);
 
 // ---- Filters + export (fixed paths before ":id") ----
 router.get("/filters", getMaterialFilterOptions);
@@ -46,9 +48,9 @@ router.get("/export", exportMaterials);
 
 // ---- Core CRUD ----
 router.get("/", listMaterials);
-router.post("/", createMaterial);
+router.post("/", materialsChanged, createMaterial);
 router.get("/:id", getMaterialById);
-router.put("/:id", updateMaterial);
-router.delete("/:id", deleteMaterial);
+router.put("/:id", materialsChanged, updateMaterial);
+router.delete("/:id", materialsChanged, deleteMaterial);
 
 module.exports = router;

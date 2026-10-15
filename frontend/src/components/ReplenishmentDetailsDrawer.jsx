@@ -30,6 +30,7 @@
 import { useEffect, useRef, useState } from "react";
 import { saveReplenishmentPlan, resetReplenishmentPlan, applyToAllReplenishmentPlan } from "../services/planningService";
 import MonthlyDemandDistribution, { SourceTag } from "./MonthlyDemandDistribution";
+import { isSameAllocation } from "./replenishmentAllocation";
 
 const num = (n) => Number(n ?? 0).toLocaleString("en-IN");
 
@@ -81,6 +82,8 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
 
   const prevOpenRef = useRef(false);
   const prevMaterialRef = useRef(null);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
   useEffect(() => {
     const wasOpen = prevOpenRef.current;
     prevOpenRef.current = open;
@@ -89,6 +92,9 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
     const isNewOpen = !wasOpen;
     const isNewMaterial = prevMaterialRef.current !== key;
     prevMaterialRef.current = key;
+    // A background refresh of the same row must never wipe the planner's
+    // unsaved edits — only a fresh open, another material or a save re-inits.
+    if (!isNewOpen && !isNewMaterial && dirtyRef.current) return;
     if (activePlan?.distribution?.length) {
       setAllocation(activePlan.distribution.map((d) => ({ month: d.month, percentage: d.percentage, quantity: d.quantity, source: d.source })));
     } else {
@@ -115,8 +121,18 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
   // state. Safe N/A states (missing/invalid forecast) never invent percentages.
   const editable = Boolean(allocation) && (activePlan?.mode === "MANUAL" || (activePlan?.mode === "AUTO_FORECAST" && activePlan?.state === "computed"));
 
+  // A real change = the editor differs from the active plan it was loaded from
+  // (compared by month and percentage, so typing a value back, or Reset /
+  // Generate restoring the same split, is not a change). Only a real change
+  // can be saved — an untouched AUTO plan must stay AUTO.
+  const hasChanges = Boolean(allocation) && !isSameAllocation(allocation, activePlan?.distribution);
+  // The forecast changed after this MANUAL plan was saved. The plan is never
+  // overwritten; the planner can adjust it, or confirm it unchanged.
+  const needsReview = activePlan?.mode === "MANUAL" && Boolean(activePlan?.forecastChangedSinceSaved);
+  const canConfirm = needsReview && !hasChanges && Boolean(allocation);
+
   // Source label — never color-only (spec: text distinguishes AUTO vs MANUAL).
-  const isDirty = dirty && allocation;
+  const isDirty = hasChanges;
   const sourceLabel = isDirty
     ? "MANUAL · Planner Override"
     : activePlan?.mode === "MANUAL"
@@ -190,11 +206,15 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
     }
     setDirty(true);
     setSaveError(null);
-    setSaveMessage("Forecasted allocation loaded — review and save to persist.");
+    setSaveMessage(
+      autoPlan?.distribution?.length && isSameAllocation(autoPlan.distribution, activePlan?.distribution)
+        ? "Already showing the auto-predicted allocation."
+        : "Forecasted allocation loaded — review and save to persist."
+    );
   };
 
   const handleSave = async () => {
-    if (!allocation) return;
+    if (!allocation || (!hasChanges && !canConfirm)) return;
     if (pctTotalStatus !== "ok") {
       setSaveError("Percentages must each be 0–100 and total exactly 100%.");
       return;
@@ -221,8 +241,19 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
         depotId: "",
       };
       const saved = await saveReplenishmentPlan(payload);
-      setSaveMessage("Replenishment allocation saved.");
       setDirty(false);
+      if (saved.confirmed) {
+        setSaveMessage("Allocation confirmed against the latest forecast.");
+        onSave?.(row.materialNo, { ...activePlan, basedOnForecastVersion: saved.basedOnForecastVersion, forecastChangedSinceSaved: false });
+        return;
+      }
+      if (saved.unchanged) {
+        // Server found nothing to persist — the active plan (AUTO or MANUAL) stays as it is.
+        setAllocation(activePlan.distribution.map((d) => ({ month: d.month, percentage: d.percentage, quantity: d.quantity, source: d.source })));
+        setSaveMessage("No changes to save.");
+        return;
+      }
+      setSaveMessage("Replenishment allocation saved.");
       onSave?.(row.materialNo, {
         mode: "MANUAL",
         state: autoPlan?.state || "computed",
@@ -353,6 +384,11 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
                 {isAutoActive && (
                   <p className="mb-2 text-xs text-gray-400 italic">Recommended from XGBoost demand forecast and projected stock depletion.</p>
                 )}
+                {needsReview && !isDirty && (
+                  <p className="mb-2 rounded-md border border-[#B45309]/25 bg-[#B45309]/5 px-3 py-2 text-xs text-[#92400E]">
+                    Forecast updated — this manual plan may need review. Your allocation has been kept; adjust it, confirm it, or Reset to the automatic plan.
+                  </p>
+                )}
 
                 {requiredStock === 0 ? (
                   <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-500">
@@ -435,11 +471,12 @@ export default function ReplenishmentDetailsDrawer({ open, onClose, row, activeF
                         </button>
                         <button
                           onClick={handleSave}
-                          disabled={isSaving || !allocation || applyAllSaving}
+                          disabled={isSaving || (!hasChanges && !canConfirm) || applyAllSaving}
+                          title={allocation && !hasChanges && !canConfirm ? "No changes to save" : undefined}
                           className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-white transition hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {isSaving && <Spinner />}
-                          Save Allocation
+                          {canConfirm ? "Confirm Allocation" : "Save Allocation"}
                         </button>
                         <button
                           onClick={handleApplyAllClick}

@@ -58,7 +58,7 @@ function queueOf(statusFilter) {
  * Transfers list — server-side search / filters / sort / pagination on
  * GET /distribution/transfers. Lifecycle actions live in the transfer drawer.
  */
-export default function DistributionTransfers({ depotNames, materialNames, reloadToken, onOpen }) {
+export default function DistributionTransfers({ depotNames, materialNames, reloadToken, retryTick, onOpen }) {
   // Resolved once, before the first render: stored queue if valid, otherwise ALL.
   const [initialQueue] = useState(() => readSessionPreference(PRIMARY_FILTER_KEYS.transfers, QUEUE_KEYS, "all"));
   const [initialFilters] = useState(() => {
@@ -77,17 +77,33 @@ export default function DistributionTransfers({ depotNames, materialNames, reloa
   }, []);
   useEffect(() => setPage(1), [filterState.queryParams]);
 
+  // Only the newest request may update the list (an older response arriving
+  // late — e.g. after a filter change — is ignored). A failed load is retried
+  // at the next automatic status check (retryTick), keeping the rows shown.
+  const loadSeq = useRef(0);
+  const loadFailed = useRef(false);
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
-      setResult(await fetchTransfers({ ...filterState.queryParams, page, limit: PAGE_SIZE }));
+      const data = await fetchTransfers({ ...filterState.queryParams, page, limit: PAGE_SIZE });
+      if (seq !== loadSeq.current) return;
+      setResult(data);
+      loadFailed.current = false;
     } catch (err) {
+      if (seq !== loadSeq.current) return;
+      loadFailed.current = true;
       setError(describeError(err, "Could not load transfers."));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [filterState.queryParams, page]);
+
+  useEffect(() => {
+    if (loadFailed.current) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retryTick]);
 
   useEffect(() => {
     const t = setTimeout(load, 250);
@@ -164,7 +180,7 @@ export default function DistributionTransfers({ depotNames, materialNames, reloa
       <FilterManager filterState={filterState} advancedFields={ADVANCED_FIELDS} />
       <ErrorBanner error={error} onRetry={load} />
 
-      {!error && (
+      {(!error || result.data.length > 0) && ( // a failed refresh keeps the rows already shown
         <DataTable
           columns={columns}
           rows={result.data}

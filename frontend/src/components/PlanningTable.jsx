@@ -88,6 +88,9 @@ function ReplenishmentPlanCell({ plan }) {
       >
         {isManual ? "MANUAL" : "AUTO"}
       </span>
+      {isManual && plan.forecastChangedSinceSaved && (
+        <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-[#B45309] align-middle" title="Forecast updated — manual plan may need review" aria-label="Forecast updated — manual plan may need review" />
+      )}
     </span>
   );
 }

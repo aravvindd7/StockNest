@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { fetchTransfer, fetchTransferMovements } from "../../services/distributionService";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchRecommendation, fetchTransfer, fetchTransferMovements } from "../../services/distributionService";
 import TransferActionDialog from "./TransferActionDialog";
 import {
-  DepotIdentity, Drawer, ErrorBanner, KV, MaterialIdentity, RouteSections, SectionTitle, StatusBadge, dateTime, describeError, nameOr, num, statusLabel,
+  DepotIdentity, Drawer, ErrorBanner, KV, MaterialIdentity, RouteSections, SectionTitle, StatusBadge, dateTime, describeError, destinationSnapshotRows,
+  nameOr, num, sourceSnapshotRows, statusLabel,
 } from "./shared";
 
 const STAGES = ["REQUESTED", "APPROVED", "DISPATCHED", "IN_TRANSIT", "RECEIVED"];
@@ -18,33 +19,63 @@ const ACTIONS_BY_STATUS = {
 };
 
 /**
- * Transfer details: route, quantities, the lifecycle timeline (straight from
- * the backend's statusHistory — never reconstructed), the StockMovement ledger
- * and the valid next actions.
+ * Transfer details: route, the inventory snapshot that explains a
+ * recommendation-linked transfer, quantities, the lifecycle timeline
+ * (straight from the backend's statusHistory — never reconstructed), the
+ * StockMovement ledger and the valid next actions.
+ *
+ * The snapshot is the originating recommendation's STORED figures (read via
+ * GET /distribution/recommendations/:id) — never recalculated and never
+ * replaced by live stock. Manual transfers have no snapshot.
  */
 export default function TransferDrawer({ open, transferId, onClose, depotNames, materialNames, plantsByDepot, onChanged }) {
   const [transfer, setTransfer] = useState(null);
   const [movements, setMovements] = useState([]);
+  const [snapshot, setSnapshot] = useState(null); // originating recommendation (stored snapshot) or null
+  const [snapshotError, setSnapshotError] = useState(null);
   const [error, setError] = useState(null);
   const [action, setAction] = useState(null);
   const [notice, setNotice] = useState(null);
 
+  // A response for an earlier request (another transfer, or a reload overtaken
+  // by a newer one) must never replace what the drawer now shows.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
     if (!transferId) return;
+    const seq = ++loadSeq.current;
+    const current = () => seq === loadSeq.current;
     setError(null);
     try {
       const t = await fetchTransfer(transferId);
+      const moves = ["DISPATCHED", "IN_TRANSIT", "RECEIVED"].includes(t.status) ? await fetchTransferMovements(t._id) : [];
+      if (!current()) return;
       setTransfer(t);
-      setMovements(["DISPATCHED", "IN_TRANSIT", "RECEIVED"].includes(t.status) ? await fetchTransferMovements(t._id) : []);
+      setMovements(moves);
+      if (t.recommendationId) await loadSnapshot(t.recommendationId, current);
     } catch (err) {
-      setError(describeError(err, "Could not load this transfer."));
+      if (current()) setError(describeError(err, "Could not load this transfer."));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transferId]);
+
+  async function loadSnapshot(recommendationId, isCurrent = () => true) {
+    setSnapshotError(null);
+    try {
+      const rec = await fetchRecommendation(recommendationId);
+      if (isCurrent()) setSnapshot(rec);
+    } catch (err) {
+      if (!isCurrent()) return;
+      setSnapshot(null);
+      setSnapshotError(describeError(err, "Could not load the recommendation snapshot."));
+    }
+  }
 
   useEffect(() => {
     if (!open) return;
     setTransfer(null);
     setMovements([]);
+    setSnapshot(null);
+    setSnapshotError(null);
     setAction(null);
     setNotice(null);
     load();
@@ -104,6 +135,31 @@ export default function TransferDrawer({ open, transferId, onClose, depotNames, 
               source={<KV rows={[["Depot", depotLabel(transfer.sourceDepotId)], ["Plant", plantOf(transfer.sourcePlantName, transfer.sourceDepotId)]]} />}
               destination={<KV rows={[["Depot", depotLabel(transfer.destinationDepotId)], ["Plant", plantOf(transfer.destinationPlantName, transfer.destinationDepotId)]]} />}
             />
+
+            <SectionTitle>Inventory Snapshot</SectionTitle>
+            {transfer.recommendationId ? (
+              <>
+                <p className="-mt-1 mb-2 text-xs text-gray-400">
+                  Inventory snapshot at recommendation time{snapshot ? ` · ${dateTime(snapshot.generatedAt)}` : ""}
+                </p>
+                {snapshot && (
+                  <div className="grid items-start gap-4 md:grid-cols-2">
+                    <div>
+                      <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-gray-400">Source</div>
+                      <KV rows={sourceSnapshotRows(snapshot)} />
+                    </div>
+                    <div>
+                      <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-gray-400">Destination</div>
+                      <KV rows={destinationSnapshotRows(snapshot)} />
+                    </div>
+                  </div>
+                )}
+                {!snapshot && !snapshotError && <div className="text-sm text-gray-400">Loading snapshot…</div>}
+                <ErrorBanner error={snapshotError} onRetry={() => loadSnapshot(transfer.recommendationId)} />
+              </>
+            ) : (
+              <p className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-500">No recommendation snapshot available for this transfer.</p>
+            )}
 
             <SectionTitle>Quantities</SectionTitle>
             <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-5">

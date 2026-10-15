@@ -8,6 +8,7 @@
  *
  *   approveRecommendation  PENDING → APPROVED, creates a REQUESTED transfer   (no stock movement)
  *   rejectRecommendation   PENDING → REJECTED                                  (no stock movement)
+ *   approveRecommendationsBulk  approveRecommendation for each reviewed PENDING recommendation of the chosen priorities
  *   createManualTransfer   → REQUESTED, no recommendation needed               (no stock movement)
  *   approveTransfer        REQUESTED → APPROVED                                 (no stock movement)
  *   dispatchTransfer       APPROVED → DISPATCHED      source SIH −q, destination SIT +q
@@ -176,6 +177,78 @@ async function rejectRecommendation(id, { reviewNotes, expectedVersion }, { acto
   return { recommendation: plain(rec) };
 }
 
+/**
+ * Bulk approval by priority — "accept these recommendations as generated".
+ *
+ * Runs approveRecommendation (every rule of an individual approval: version,
+ * PENDING-only, snapshot bound, live availability + commitment lock, transfer
+ * creation) for each recommendation the admin reviewed, at its recommended
+ * quantity, inside the caller's single transaction. Most urgent first, so
+ * earlier approvals' commitments are seen by later ones.
+ *
+ * A business-rule failure (DistributionError — thrown before the transfer is
+ * created) is recorded for that recommendation and the rest continue; any
+ * other error aborts the whole transaction, so nothing is half-approved.
+ * Pending recommendations of the chosen priorities that were not in the
+ * reviewed list (e.g. created since) are never approved — only counted.
+ *
+ * @param {{priorities: string[], recommendations: Array<{id: string, version: number}>}} body
+ */
+async function approveRecommendationsBulk({ priorities, recommendations }, { actor }, session) {
+  const rank = (p) => DistributionRecommendation.PRIORITY_VALUES.indexOf(p);
+  const ids = recommendations.map((r) => r.id);
+  const docs = await DistributionRecommendation.find({ _id: { $in: ids } })
+    .select("priority materialNo sourceDepotId destinationDepotId recommendedQuantity generatedAt").session(session).lean();
+  const byId = new Map(docs.map((d) => [String(d._id), d]));
+  const ordered = [...recommendations].sort((a, b) => {
+    const da = byId.get(a.id);
+    const db = byId.get(b.id);
+    if (!da || !db) return da ? -1 : db ? 1 : a.id.localeCompare(b.id);
+    return rank(da.priority) - rank(db.priority) || da.generatedAt - db.generatedAt || a.id.localeCompare(b.id);
+  });
+
+  const results = [];
+  for (const { id, version } of ordered) {
+    const doc = byId.get(id);
+    const base = doc
+      ? { recommendationId: id, priority: doc.priority, materialNo: doc.materialNo, sourceDepotId: doc.sourceDepotId, destinationDepotId: doc.destinationDepotId, recommendedQuantity: doc.recommendedQuantity }
+      : { recommendationId: id };
+    if (!doc) {
+      results.push({ ...base, status: "FAILED", code: "RECOMMENDATION_NOT_FOUND", message: "Distribution recommendation not found." });
+      continue;
+    }
+    if (!priorities.includes(doc.priority)) {
+      results.push({ ...base, status: "FAILED", code: "PRIORITY_NOT_SELECTED", message: `Priority ${doc.priority} was not selected for this approval.` });
+      continue;
+    }
+    try {
+      const { transfer } = await approveRecommendation(id, { expectedVersion: version }, { actor }, session);
+      results.push({ ...base, status: "APPROVED", approvedQuantity: transfer.requestedQuantity, transferId: transfer.transferId, transferObjectId: transfer._id });
+    } catch (err) {
+      if (!(err instanceof DistributionError)) throw err;
+      results.push({ ...base, status: "FAILED", code: err.code, message: err.message });
+    }
+  }
+
+  const notIncluded = await DistributionRecommendation.countDocuments({ status: "PENDING", priority: { $in: priorities }, _id: { $nin: ids } }).session(session);
+  const approved = results.filter((r) => r.status === "APPROVED");
+  return {
+    priorities,
+    requested: results.length,
+    approved: approved.length,
+    failed: results.length - approved.length,
+    transfersCreated: approved.length,
+    approvedUnits: approved.reduce((s, r) => s + r.approvedQuantity, 0),
+    notIncluded,
+    byPriority: priorities.map((priority) => {
+      const rows = results.filter((r) => r.priority === priority);
+      const ok = rows.filter((r) => r.status === "APPROVED");
+      return { priority, requested: rows.length, approved: ok.length, failed: rows.length - ok.length, approvedUnits: ok.reduce((s, r) => s + r.approvedQuantity, 0) };
+    }),
+    results,
+  };
+}
+
 // ─── Transfers ───────────────────────────────────────────────────────────────
 
 async function createManualTransfer({ materialNo, sourceDepotId, destinationDepotId, requestedQuantity, reason, notes }, { actor }, session) {
@@ -313,6 +386,7 @@ module.exports = {
   sourceAvailability,
   approveRecommendation,
   rejectRecommendation,
+  approveRecommendationsBulk,
   createManualTransfer,
   approveTransfer,
   dispatchTransfer,

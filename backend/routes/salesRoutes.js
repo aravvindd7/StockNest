@@ -2,6 +2,8 @@ const express = require("express");
 const { requireAuth } = require("../middleware/authMiddleware");
 const { requireRole } = require("../middleware/roleMiddleware");
 const upload = require("../middleware/uploadMiddleware");
+const { recordsSourceChange } = require("../middleware/sourceChange");
+const salesChanged = recordsSourceChange("sales"); // one event per successful operation → automatic updates
 const { listSales, getSalesFilterValues, getSalesSummary, getSalesMonthlyBreakdown, createSales, exportSales } = require("../controllers/salesController");
 const { importSales, getImportHistory, viewImportHistory, removeImportHistory } = require("../controllers/salesImportController");
 
@@ -12,11 +14,11 @@ router.use(requireAuth, requireRole("ADMIN"));
 
 // ---- Import history (fixed paths before ":id") ----
 router.get("/import-history", getImportHistory);
-router.post("/import-history/:id/view", viewImportHistory);
+router.post("/import-history/:id/view", salesChanged, viewImportHistory);
 router.delete("/import-history/:id", removeImportHistory);
 
 // ---- Bulk import: Append or Replace, processed directly after upload ----
-router.post("/import", upload.single("file"), importSales);
+router.post("/import", upload.single("file"), salesChanged, importSales);
 
 // ---- Export (fixed path) ----
 router.get("/export", exportSales);
@@ -28,6 +30,6 @@ router.get("/monthly", getSalesMonthlyBreakdown);
 
 // ---- Core ----
 router.get("/", listSales);
-router.post("/", createSales);
+router.post("/", salesChanged, createSales);
 
 module.exports = router;
