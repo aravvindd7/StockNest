@@ -1,13 +1,16 @@
 import { useMemo, useState } from "react";
 import DataTable from "../DataTable";
 import { SearchIcon } from "./DistributionRecommendations";
-import { ErrorBanner, StatTile, dateTime, forecastPeriodLabel, num } from "./shared";
+import { DepotIdentity, ErrorBanner, MaterialIdentity, StatTile, ToSeparator, dateTime, forecastPeriodLabel, num } from "./shared";
 
 /**
- * Network Shortages — built from a live DRY-RUN analysis (POST
+ * Network Analysis — "Where is inventory needed, and how much of that need can
+ * the existing depot network solve?" Built from a live DRY-RUN analysis (POST
  * /distribution/recommendations/generate { dryRun: true }): the engine's full
- * current computation, nothing saved. There is no persisted shortages
- * endpoint, so this view always reflects the moment the analysis ran.
+ * current computation of stock, safety stock, forecast demand, open inbound,
+ * shortage and source opportunities — nothing saved. There is no persisted
+ * analysis endpoint, so this view reflects the moment the analysis last ran
+ * (on page load and on the header's Refresh).
  *
  * For every destination short of stock it separates:
  *   covered    — shortage the engine can fill by moving surplus between depots
@@ -51,7 +54,7 @@ function groupFiltered(filtered) {
   return [...groups.values()];
 }
 
-export default function DistributionShortages({ analysis, loading, error, onRun, depotNames, stale }) {
+export default function DistributionNetworkAnalysis({ analysis, loading, error, onRun, depotNames, materialNames, stale }) {
   const [search, setSearch] = useState("");
   const [klass, setKlass] = useState("all");
 
@@ -67,8 +70,8 @@ export default function DistributionShortages({ analysis, loading, error, onRun,
   const filteredGroups = useMemo(() => groupFiltered(analysis?.filteredRecommendations || []), [analysis]);
 
   const columns = [
-    { key: "materialNo", label: "Material", sortable: false, sticky: true, stickyOffset: 0, width: 104, render: (r) => <span className="font-mono font-semibold">{r.materialNo}</span> },
-    { key: "depotId", label: "Depot", sortable: false, render: (r) => <span>{r.depotId}{depotNames?.[r.depotId] && <span className="ml-1 text-gray-400">· {depotNames[r.depotId]}</span>}</span> },
+    { key: "materialNo", label: "Material", sortable: false, sticky: true, stickyOffset: 0, width: 232, render: (r) => <MaterialIdentity materialNo={r.materialNo} materialName={materialNames?.[r.materialNo]} maxWidth={200} /> },
+    { key: "depotId", label: "Depot", sortable: false, render: (r) => <DepotIdentity depotId={r.depotId} depotName={depotNames?.[r.depotId]} /> },
     { key: "currentStock", label: "Current Stock", sortable: false, className: "text-right", render: (r) => num(r.currentStock) },
     { key: "safetyStock", label: "Safety Stock", sortable: false, className: "text-right", render: (r) => num(r.safetyStock) },
     { key: "forecastDemand", label: "Forecast Demand", sortable: false, className: "text-right", render: (r) => num(r.forecastDemand) },
@@ -81,19 +84,18 @@ export default function DistributionShortages({ analysis, loading, error, onRun,
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="sn-card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-        <div className="text-sm text-gray-600">
-          {analysis ? (
-            <>
-              <b>Live analysis</b> for {forecastPeriodLabel(analysis.forecastPeriod)} · computed {dateTime(analysis.generatedAt)} ·{" "}
-              <span className="text-gray-400">dry run — nothing saved, no recommendations created</span>
-            </>
-          ) : (
-            "Run the analysis to see the current network position."
-          )}
-          {stale && analysis && <span className="ml-2 font-semibold text-[#B45309]">Data changed since — re-run for current figures.</span>}
-        </div>
-        <button onClick={onRun} disabled={loading} className="sn-btn-ghost disabled:opacity-60">{loading ? "Analysing…" : analysis ? "Re-run Analysis" : "Run Analysis"}</button>
+      <div className="sn-card px-4 py-3 text-sm text-gray-600">
+        {analysis ? (
+          <>
+            <b>Live network analysis</b> for {forecastPeriodLabel(analysis.forecastPeriod)} · computed {dateTime(analysis.generatedAt)} ·{" "}
+            <span className="text-gray-400">dry run — nothing saved, no recommendations created. Refresh recalculates it.</span>
+          </>
+        ) : loading ? (
+          "Analysing the network…"
+        ) : (
+          "The network analysis has not run yet — use Refresh."
+        )}
+        {stale && analysis && <span className="ml-2 font-semibold text-[#B45309]">Stock or transfers changed since — use Refresh to recalculate.</span>}
       </div>
 
       <ErrorBanner error={error} onRetry={onRun} />
@@ -144,19 +146,23 @@ export default function DistributionShortages({ analysis, loading, error, onRun,
                       <th className="px-3 py-2">Material</th>
                       <th className="px-3 py-2">Source</th>
                       <th className="px-3 py-2 text-right">Remaining Surplus at Source</th>
-                      <th className="px-3 py-2">Considered For (quantity each)</th>
+                      <th className="px-1 py-2" aria-label="to" />
+                      <th className="px-3 py-2">Destinations Considered (quantity each)</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredGroups.map((g) => (
                       <tr key={`${g.materialNo}|${g.sourceDepotId}|${g.sourceRemainingSurplus}`} className="border-t border-gray-100 align-top">
-                        <td className="px-3 py-2 font-mono font-semibold">{g.materialNo}</td>
-                        <td className="px-3 py-2">{g.sourceDepotId}{depotNames?.[g.sourceDepotId] && <span className="text-gray-400"> · {depotNames[g.sourceDepotId]}</span>}</td>
+                        <td className="px-3 py-2"><MaterialIdentity materialNo={g.materialNo} materialName={materialNames?.[g.materialNo]} /></td>
+                        <td className="px-3 py-2"><DepotIdentity depotId={g.sourceDepotId} depotName={depotNames?.[g.sourceDepotId]} /></td>
                         <td className="px-3 py-2 text-right font-semibold">{num(g.sourceRemainingSurplus)} units</td>
+                        <td className="px-1 py-2 text-center"><ToSeparator /></td>
                         <td className="px-3 py-2">
                           <div className="flex flex-wrap gap-1">
                             {g.destinations.map((d) => (
-                              <span key={d.depotId} className="rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[11px]">{d.depotId}: {num(d.quantity)}</span>
+                              <span key={d.depotId} className="rounded border border-gray-200 px-1.5 py-0.5 text-[12px]">
+                                {depotNames?.[d.depotId] ? <><span className="font-semibold">{depotNames[d.depotId]}</span> <span className="font-mono text-[10.5px] text-gray-500">{d.depotId}</span></> : <span className="font-mono">{d.depotId}</span>}: {num(d.quantity)}
+                              </span>
                             ))}
                           </div>
                           {g.destinations.length > 1 && <div className="mt-1 text-[11px] text-gray-400">Same {num(g.sourceRemainingSurplus)} units considered for {g.destinations.length} destinations — not additive.</div>}

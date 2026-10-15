@@ -22,8 +22,10 @@ import { useCallback, useMemo, useState } from "react";
  * underlying state — a column filter IS just a shortcut into the same
  * filter set the drawer edits, so chips/clear-all work uniformly for both.
  */
-export function useTableFilters({ filterConfig = [], defaultSort = null } = {}) {
-  const [filters, setFilters] = useState({}); // { [key]: filterValue }
+export function useTableFilters({ filterConfig = [], defaultSort = null, initialFilters } = {}) {
+  // initialFilters (optional): filter state applied from the very first render,
+  // so a restored selection never flashes an unfiltered table first.
+  const [filters, setFilters] = useState(() => initialFilters || {}); // { [key]: filterValue }
   const [search, setSearch] = useState("");
   const [sort, setSortState] = useState(defaultSort ? { sortBy: defaultSort, sortDir: "asc" } : { sortBy: null, sortDir: "asc" });
 

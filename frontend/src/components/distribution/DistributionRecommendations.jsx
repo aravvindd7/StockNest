@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DataTable from "../DataTable";
 import FilterManager from "../table/FilterManager";
 import { useTableFilters } from "../table/useTableFilters";
 import { DISTRIBUTION_OPTIONS, createDistributionFilterOptions, fetchRecommendations } from "../../services/distributionService";
-import { ErrorBanner, PriorityBadge, StatusBadge, dateTime, describeError, forecastPeriodLabel, num } from "./shared";
+import {
+  DepotIdentity, ErrorBanner, MaterialIdentity, PRIMARY_FILTER_KEYS, PriorityBadge, StatusBadge, TO_COLUMN, dateTime, describeError, forecastPeriodLabel, num,
+  readSessionPreference, writeSessionPreference,
+} from "./shared";
 
 const getFilterOptions = createDistributionFilterOptions("recommendationStatus");
 
@@ -36,23 +39,45 @@ const QUICK = [
 
 const PAGE_SIZE = 50;
 
+// Primary filter preference (sessionStorage): "ALL" or one of the quick statuses.
+const PRIMARY_VALUES = ["ALL", ...QUICK.filter(([v]) => v).map(([v]) => v)];
+const statusFilterFor = (primary) => (primary === "ALL" ? null : { mode: "values", values: [primary] });
+/** The quick selection a status filter corresponds to — "ALL", a status, or null for a custom (column/advanced) filter. */
+function primaryOf(statusFilter) {
+  if (!statusFilter) return "ALL";
+  return statusFilter.mode === "values" && statusFilter.values.length === 1 && PRIMARY_VALUES.includes(statusFilter.values[0]) ? statusFilter.values[0] : null;
+}
+
 /**
  * Recommendations list — server-side search / filters / sort / pagination on
- * GET /distribution/recommendations. Defaults to PENDING (what needs review);
- * rows from the most recent generation run are tagged so new work stands out.
+ * GET /distribution/recommendations. Opens on the primary filter remembered for
+ * this browser session (ALL by default); rows from the most recent generation
+ * run are tagged so new work stands out.
  */
-export default function DistributionRecommendations({ depotNames, latestRunId, reloadToken, onOpen }) {
-  const filterState = useTableFilters({ filterConfig: FILTER_CONFIG });
+export default function DistributionRecommendations({ depotNames, materialNames, latestRunId, latestRunAt, reloadToken, onOpen }) {
+  // Resolved once, before the first render: stored value if valid, otherwise ALL.
+  const [initialPrimary] = useState(() => readSessionPreference(PRIMARY_FILTER_KEYS.recommendations, PRIMARY_VALUES, "ALL"));
+  const [initialFilters] = useState(() => {
+    const status = statusFilterFor(initialPrimary);
+    return status ? { status } : {};
+  });
+  const filterState = useTableFilters({ filterConfig: FILTER_CONFIG, initialFilters });
   const [page, setPage] = useState(1);
   const [result, setResult] = useState({ data: [], pagination: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Default view: what needs review.
+  // Remember the primary selection for this session only when the user changes it:
+  // compared with the value resolved at mount, so mounting (incl. StrictMode's dev
+  // re-run) never writes. Custom column/advanced status filters are not a primary selection.
+  const primary = primaryOf(filterState.filters.status);
+  const savedPrimary = useRef(initialPrimary);
   useEffect(() => {
-    filterState.setFilterValue("status", { mode: "values", values: ["PENDING"] });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (primary && primary !== savedPrimary.current) {
+      savedPrimary.current = primary;
+      writeSessionPreference(PRIMARY_FILTER_KEYS.recommendations, primary);
+    }
+  }, [primary]);
 
   useEffect(() => setPage(1), [filterState.queryParams]);
 
@@ -78,17 +103,13 @@ export default function DistributionRecommendations({ depotNames, latestRunId, r
   const runFilter = filterState.filters.generationRunId;
   const latestOnly = Boolean(latestRunId && runFilter?.mode === "values" && runFilter.values[0] === latestRunId);
 
-  const depotCell = (id) => (
-    <div className="leading-tight">
-      <div className="font-mono text-[#3B4666]">{id}</div>
-      {depotNames?.[id] && <div className="text-[11px] text-gray-400">{depotNames[id]}</div>}
-    </div>
-  );
+  const depotCell = (id) => <DepotIdentity depotId={id} depotName={depotNames?.[id]} />;
 
   const columns = useMemo(() => [
     { key: "priority", label: "Priority", sticky: true, stickyOffset: 0, width: 116, filterType: "text", multiselect: true, render: (r) => <PriorityBadge priority={r.priority} /> },
-    { key: "materialNo", label: "Material", sticky: true, stickyOffset: 116, width: 104, filterType: "text", multiselect: true, render: (r) => <span className="font-mono font-semibold">{r.materialNo}</span> },
+    { key: "materialNo", label: "Material", sticky: true, stickyOffset: 116, width: 232, filterType: "text", multiselect: true, render: (r) => <MaterialIdentity materialNo={r.materialNo} materialName={materialNames?.[r.materialNo]} maxWidth={200} /> },
     { key: "sourceDepotId", label: "Source", filterType: "text", multiselect: true, render: (r) => depotCell(r.sourceDepotId) },
+    TO_COLUMN,
     { key: "destinationDepotId", label: "Destination", filterType: "text", multiselect: true, render: (r) => depotCell(r.destinationDepotId) },
     { key: "recommendedQuantity", label: "Recommended Qty", filterType: "number", className: "text-right", render: (r) => <span className="font-display text-[14px] font-bold">{num(r.recommendedQuantity)}</span> },
     { key: "forecastPeriod", label: "Forecast Period", sortable: false, render: (r) => <span className="text-gray-600">{forecastPeriodLabel(r.forecastPeriod)}</span> },
@@ -106,7 +127,7 @@ export default function DistributionRecommendations({ depotNames, latestRunId, r
       ),
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [depotNames, latestRunId]);
+  ], [depotNames, materialNames, latestRunId]);
 
   const pagination = result.pagination;
 
@@ -143,6 +164,7 @@ export default function DistributionRecommendations({ depotNames, latestRunId, r
               onChange={(e) => filterState.setFilterValue("generationRunId", e.target.checked ? { mode: "values", values: [latestRunId] } : null)}
             />
             Latest run only <span className="font-mono text-[11px] text-gray-400">{latestRunId}</span>
+            {latestRunAt && <span className="text-[11px] text-gray-400">· generated {dateTime(latestRunAt)}</span>}
           </label>
         )}
       </div>

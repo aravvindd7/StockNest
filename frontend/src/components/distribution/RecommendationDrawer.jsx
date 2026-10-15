@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { approveRecommendation, fetchRecommendation, rejectRecommendation } from "../../services/distributionService";
 import {
-  Drawer, ErrorBanner, Field, KV, PriorityBadge, SectionTitle, StatusBadge, dateTime, describeError, forecastPeriodLabel, num, useSubmission,
+  DepotIdentity, Drawer, ErrorBanner, Field, KV, MaterialIdentity, PriorityBadge, RouteSections, SectionTitle, StatusBadge, dateTime, describeError,
+  forecastPeriodLabel, nameOr, num, useSubmission,
 } from "./shared";
 
 /**
@@ -10,7 +11,7 @@ import {
  * reason is displayed verbatim. Approve / Reject call the Stage 4 endpoints;
  * approval creates a REQUESTED transfer on the server — no stock moves.
  */
-export default function RecommendationDrawer({ open, recommendationId, onClose, depotNames, plantsByDepot, onChanged, onOpenTransfer }) {
+export default function RecommendationDrawer({ open, recommendationId, onClose, depotNames, materialNames, plantsByDepot, onChanged, onOpenTransfer }) {
   const [rec, setRec] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [mode, setMode] = useState(null); // null | "approve" | "reject"
@@ -86,7 +87,7 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
     if (submission.error?.status === 409) load();
   }, [submission.error, load]);
 
-  const depotLabel = (id) => (depotNames?.[id] ? `${id} · ${depotNames[id]}` : id);
+  const depotLabel = (id) => <DepotIdentity depotId={id} depotName={depotNames?.[id]} align="right" />;
   const plantLabel = (id) => (plantsByDepot?.[id]?.length ? plantsByDepot[id].join(", ") : "—");
 
   const footer = rec?.status === "PENDING" && (
@@ -117,7 +118,7 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
       open={open}
       onClose={onClose}
       title="Distribution Recommendation"
-      subtitle={rec ? `${rec.materialNo} · ${rec.sourceDepotId} → ${rec.destinationDepotId}` : "Loading…"}
+      subtitle={rec ? `${nameOr(materialNames, rec.materialNo)} · ${nameOr(depotNames, rec.sourceDepotId)} to ${nameOr(depotNames, rec.destinationDepotId)}` : "Loading…"}
       badge={rec && <StatusBadge status={rec.status} />}
       footer={footer}
     >
@@ -137,6 +138,10 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
           )}
           <StatusNote rec={rec} onOpenTransfer={onOpenTransfer} />
 
+          <div className="mb-4">
+            <MaterialIdentity materialNo={rec.materialNo} materialName={materialNames?.[rec.materialNo]} size="lg" />
+          </div>
+
           <div className="grid grid-cols-3 gap-3">
             <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
               <div className="text-[10.5px] uppercase tracking-wide text-gray-500">Recommended Quantity</div>
@@ -152,9 +157,9 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
             </div>
           </div>
 
-          <div className="mt-2 grid gap-4 md:grid-cols-2">
-            <div>
-              <SectionTitle>Source</SectionTitle>
+          <div className="mt-2">
+          <RouteSections
+            source={
               <KV rows={[
                 ["Depot", depotLabel(rec.sourceDepotId)],
                 ["Plant (current mapping)", plantLabel(rec.sourceDepotId)],
@@ -165,9 +170,8 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
                 ["Forecast Demand", num(rec.sourceForecastDemand)],
                 ["Transferable Surplus", num(rec.sourceSurplus), "text-healthy"],
               ]} />
-            </div>
-            <div>
-              <SectionTitle>Destination</SectionTitle>
+            }
+            destination={
               <KV rows={[
                 ["Depot", depotLabel(rec.destinationDepotId)],
                 ["Plant (current mapping)", plantLabel(rec.destinationDepotId)],
@@ -177,7 +181,8 @@ export default function RecommendationDrawer({ open, recommendationId, onClose, 
                 ["Forecast Demand", num(rec.destinationForecastDemand)],
                 ["Shortage", num(rec.destinationShortage), "text-out"],
               ]} />
-            </div>
+            }
+          />
           </div>
           <p className="mt-2 text-xs text-gray-400">
             Snapshot values recorded by the engine at generation time. Stock in transit is never counted as transferable.

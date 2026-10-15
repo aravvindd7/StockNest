@@ -73,6 +73,33 @@ export function StatusBadge({ status }) {
   );
 }
 
+// ─── Session-scoped UI preferences ───────────────────────────────────────────
+
+/** sessionStorage keys — only the Recommendations / Transfers primary filter selection, never data. */
+export const PRIMARY_FILTER_KEYS = {
+  recommendations: "distribution.recommendations.primaryFilter",
+  transfers: "distribution.transfers.primaryFilter",
+};
+
+/** Stored value if it is one of `validValues`; otherwise (missing, obsolete, storage unavailable) `fallback`. */
+export function readSessionPreference(key, validValues, fallback) {
+  try {
+    const value = window.sessionStorage.getItem(key);
+    return value !== null && validValues.includes(value) ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Saves one preference value; silently ignored if sessionStorage is unavailable. */
+export function writeSessionPreference(key, value) {
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable (e.g. private mode quota) — the preference just isn't remembered */
+  }
+}
+
 // ─── Layout pieces ───────────────────────────────────────────────────────────
 
 export function TabButton({ active, onClick, children, count }) {
@@ -125,6 +152,65 @@ export function Drawer({ open, onClose, title, subtitle, badge, children, footer
     </>
   );
 }
+
+/**
+ * Identity display: the human name is the primary value (semibold, high
+ * contrast); the internal ID is a smaller, muted, monospace secondary line —
+ * kept visible for operational/audit reference. Falls back to the ID alone
+ * when no name is known. Presentation only — IDs and data are untouched.
+ */
+function Identity({ name, id, align = "left", size = "md", maxWidth }) {
+  if (!name) return <span className="font-mono font-semibold text-[#1B2338]">{id}</span>;
+  const nameSize = size === "lg" ? "text-[15px] font-bold" : "text-[13px] font-semibold";
+  return (
+    <span className={`inline-flex min-w-0 flex-col leading-tight ${align === "right" ? "items-end text-right" : ""}`}>
+      <span className={`${nameSize} text-[#1B2338] ${maxWidth ? "block truncate" : ""}`} style={maxWidth ? { maxWidth } : undefined} title={name}>
+        {name}
+      </span>
+      <span className="font-mono text-[11px] font-normal text-gray-500">{id}</span>
+    </span>
+  );
+}
+
+/** Depot: centre name primary, depot ID secondary. */
+export function DepotIdentity({ depotId, depotName, align, size }) {
+  return <Identity name={depotName} id={depotId} align={align} size={size} />;
+}
+
+/** Material: material name primary, material number secondary. */
+export function MaterialIdentity({ materialNo, materialName, align, size, maxWidth }) {
+  return <Identity name={materialName} id={materialNo} align={align} size={size} maxWidth={maxWidth} />;
+}
+
+/** Compact direction marker between a source and a destination. */
+export function ToSeparator() {
+  return <span className="inline-block rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-gray-500">to</span>;
+}
+
+/** Table column that sits between Source and Destination, so the row reads "Chennai TO Coimbatore". */
+export const TO_COLUMN = { key: "_to", label: "", sortable: false, className: "text-center", render: () => <ToSeparator /> };
+
+/** Drawer layout: SOURCE · TO · DESTINATION side by side (stacked on narrow screens). */
+export function RouteSections({ source, destination }) {
+  return (
+    <div className="grid items-start gap-4 md:grid-cols-[1fr_auto_1fr]">
+      <div>
+        <SectionTitle>Source</SectionTitle>
+        {source}
+      </div>
+      <div className="flex items-center justify-center md:self-center md:pt-6">
+        <ToSeparator />
+      </div>
+      <div>
+        <SectionTitle>Destination</SectionTitle>
+        {destination}
+      </div>
+    </div>
+  );
+}
+
+/** "Chennai" (name) or the ID when no name is known — for plain-text places such as drawer subtitles. */
+export const nameOr = (map, id) => (map?.[id] ? map[id] : id);
 
 export function SectionTitle({ children, aside }) {
   return (

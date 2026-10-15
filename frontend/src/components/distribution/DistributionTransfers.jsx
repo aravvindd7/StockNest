@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DataTable from "../DataTable";
 import FilterManager from "../table/FilterManager";
 import { useTableFilters } from "../table/useTableFilters";
 import { DISTRIBUTION_OPTIONS, createDistributionFilterOptions, fetchTransfers } from "../../services/distributionService";
 import { SearchIcon } from "./DistributionRecommendations";
-import { ErrorBanner, StatusBadge, dateTime, describeError, num } from "./shared";
+import {
+  DepotIdentity, ErrorBanner, MaterialIdentity, PRIMARY_FILTER_KEYS, StatusBadge, TO_COLUMN, dateTime, describeError, num, readSessionPreference,
+  writeSessionPreference,
+} from "./shared";
 
 const getFilterOptions = createDistributionFilterOptions("transferStatus");
 
@@ -38,24 +41,40 @@ export const TRANSFER_QUEUES = [
 
 const PAGE_SIZE = 50;
 
+// Primary filter preference (sessionStorage): one of the queue keys above, "all" by default.
+const QUEUE_KEYS = TRANSFER_QUEUES.map(([key]) => key);
+const statusFilterForQueue = (key) => {
+  const statuses = TRANSFER_QUEUES.find((q) => q[0] === key)?.[2];
+  return statuses ? { mode: "values", values: statuses } : null;
+};
+/** The queue a status filter corresponds to — a queue key, "all", or "custom" for a column/advanced filter. */
+function queueOf(statusFilter) {
+  if (!statusFilter) return "all";
+  const vals = [...(statusFilter.values || [])].sort().join();
+  return TRANSFER_QUEUES.find((q) => q[2] && [...q[2]].sort().join() === vals)?.[0] || "custom";
+}
+
 /**
  * Transfers list — server-side search / filters / sort / pagination on
  * GET /distribution/transfers. Lifecycle actions live in the transfer drawer.
  */
-export default function DistributionTransfers({ depotNames, reloadToken, initialQueue = "active", onOpen }) {
-  const filterState = useTableFilters({ filterConfig: FILTER_CONFIG });
+export default function DistributionTransfers({ depotNames, materialNames, reloadToken, onOpen }) {
+  // Resolved once, before the first render: stored queue if valid, otherwise ALL.
+  const [initialQueue] = useState(() => readSessionPreference(PRIMARY_FILTER_KEYS.transfers, QUEUE_KEYS, "all"));
+  const [initialFilters] = useState(() => {
+    const status = statusFilterForQueue(initialQueue);
+    return status ? { status } : {};
+  });
+  const filterState = useTableFilters({ filterConfig: FILTER_CONFIG, initialFilters });
   const [page, setPage] = useState(1);
   const [result, setResult] = useState({ data: [], pagination: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const applyQueue = useCallback((key) => {
-    const statuses = TRANSFER_QUEUES.find((q) => q[0] === key)?.[2];
-    filterState.setFilterValue("status", statuses ? { mode: "values", values: statuses } : null);
+    filterState.setFilterValue("status", statusFilterForQueue(key));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => applyQueue(initialQueue), [initialQueue, applyQueue]);
   useEffect(() => setPage(1), [filterState.queryParams]);
 
   const load = useCallback(async () => {
@@ -75,25 +94,27 @@ export default function DistributionTransfers({ depotNames, reloadToken, initial
     return () => clearTimeout(t);
   }, [load, reloadToken]);
 
-  const current = filterState.filters.status;
-  const currentKey = (() => {
-    if (!current) return "all";
-    const vals = [...(current.values || [])].sort().join();
-    return TRANSFER_QUEUES.find((q) => q[2] && [...q[2]].sort().join() === vals)?.[0] || "custom";
-  })();
+  const currentKey = queueOf(filterState.filters.status);
 
-  const depotCell = (id) => (
-    <div className="leading-tight">
-      <div className="font-mono text-[#3B4666]">{id}</div>
-      {depotNames?.[id] && <div className="text-[11px] text-gray-400">{depotNames[id]}</div>}
-    </div>
-  );
+  // Remember the primary queue for this session only when the user changes it:
+  // compared with the queue resolved at mount, so mounting (incl. StrictMode's dev
+  // re-run) never writes. Custom column/advanced status filters are not a queue.
+  const savedQueue = useRef(initialQueue);
+  useEffect(() => {
+    if (currentKey !== "custom" && currentKey !== savedQueue.current) {
+      savedQueue.current = currentKey;
+      writeSessionPreference(PRIMARY_FILTER_KEYS.transfers, currentKey);
+    }
+  }, [currentKey]);
+
+  const depotCell = (id) => <DepotIdentity depotId={id} depotName={depotNames?.[id]} />;
   const qty = (v) => <span className={v === undefined || v === null ? "text-gray-300" : "font-semibold"}>{num(v)}</span>;
 
   const columns = useMemo(() => [
     { key: "transferId", label: "Transfer ID", sticky: true, stickyOffset: 0, width: 116, filterType: "text", render: (r) => <span className="font-mono font-semibold text-primary">{r.transferId}</span> },
-    { key: "materialNo", label: "Material", filterType: "text", multiselect: true, render: (r) => <span className="font-mono font-semibold">{r.materialNo}</span> },
+    { key: "materialNo", label: "Material", filterType: "text", multiselect: true, render: (r) => <MaterialIdentity materialNo={r.materialNo} materialName={materialNames?.[r.materialNo]} maxWidth={220} /> },
     { key: "sourceDepotId", label: "Source", filterType: "text", multiselect: true, render: (r) => depotCell(r.sourceDepotId) },
+    TO_COLUMN,
     { key: "destinationDepotId", label: "Destination", filterType: "text", multiselect: true, render: (r) => depotCell(r.destinationDepotId) },
     { key: "requestedQuantity", label: "Requested", filterType: "number", className: "text-right", render: (r) => qty(r.requestedQuantity) },
     { key: "approvedQuantity", label: "Approved", sortable: false, className: "text-right", render: (r) => qty(r.approvedQuantity) },
@@ -113,7 +134,7 @@ export default function DistributionTransfers({ depotNames, reloadToken, initial
     { key: "status", label: "Status", filterType: "text", multiselect: true, render: (r) => <StatusBadge status={r.status} /> },
     { key: "requestedAt", label: "Requested At", render: (r) => <span className="font-mono text-gray-600">{dateTime(r.requestedAt)}</span> },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [depotNames]);
+  ], [depotNames, materialNames]);
 
   return (
     <div className="flex flex-col gap-4">

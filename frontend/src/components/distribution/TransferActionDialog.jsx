@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { transferAction } from "../../services/distributionService";
-import { ErrorBanner, Field, num, useSubmission } from "./shared";
+import { ErrorBanner, Field, ToSeparator, num, useSubmission } from "./shared";
 
 /**
  * One modal for every transfer lifecycle action. Each action's body matches
@@ -13,14 +13,14 @@ const ACTIONS = {
     path: "approve",
     title: "Approve transfer",
     confirm: "Approve Transfer",
-    explain: (t) => `No stock moves on approval. ${num(t.requestedQuantity)} requested; the approved quantity is committed against ${t.sourceDepotId}'s stock in hand. The server re-checks live availability.`,
+    explain: (t, L) => `No stock moves on approval. ${num(t.requestedQuantity)} requested; the approved quantity is committed against ${L.source}'s stock in hand. The server re-checks live availability.`,
   },
   dispatch: {
     path: "dispatch",
     title: "Dispatch transfer",
     confirm: "Confirm Dispatch",
     irreversible: true,
-    explain: (t) => `Stock moves now: ${t.sourceDepotId}'s stock in hand decreases and the goods become in-transit stock at ${t.destinationDepotId}. A dispatched transfer can no longer be cancelled.`,
+    explain: (t, L) => `Stock moves now: ${L.source}'s stock in hand decreases and the goods become in-transit stock at ${L.destination}. A dispatched transfer can no longer be cancelled.`,
   },
   "in-transit": {
     path: "in-transit",
@@ -33,19 +33,24 @@ const ACTIONS = {
     title: "Receive transfer",
     confirm: "Confirm Receipt",
     irreversible: true,
-    explain: (t) => `Stock moves now: ${t.destinationDepotId}'s in-transit stock is cleared and the received quantity is added to its stock in hand. Any shortfall is recorded as transit loss. Enter the quantity actually received.`,
+    explain: (t, L) => `Stock moves now: ${L.destination}'s in-transit stock is cleared and the received quantity is added to its stock in hand. Any shortfall is recorded as transit loss. Enter the quantity actually received.`,
   },
   cancel: {
     path: "cancel",
     title: "Cancel transfer",
     confirm: "Cancel Transfer",
     danger: true,
-    explain: (t) => `No stock has moved yet. Cancelling releases the ${num(t.approvedQuantity ?? t.requestedQuantity)} units committed against ${t.sourceDepotId}. This cannot be undone.`,
+    explain: (t, L) => `No stock has moved yet. Cancelling releases the ${num(t.approvedQuantity ?? t.requestedQuantity)} units committed against ${L.source}. This cannot be undone.`,
   },
 };
 
-export default function TransferActionDialog({ action, transfer, onClose, onDone }) {
+export default function TransferActionDialog({ action, transfer, labels, onClose, onDone }) {
   const cfg = ACTIONS[action];
+  const L = {
+    material: labels?.material || transfer?.materialNo,
+    source: labels?.source || transfer?.sourceDepotId,
+    destination: labels?.destination || transfer?.destinationDepotId,
+  };
   const [qty, setQty] = useState("");
   const [text, setText] = useState(""); // reason / discrepancy reason
   const [notes, setNotes] = useState("");
@@ -118,7 +123,10 @@ export default function TransferActionDialog({ action, transfer, onClose, onDone
         <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
           <div>
             <h3 className="font-display text-base font-bold">{cfg.title}</h3>
-            <p className="text-xs text-gray-500">{transfer.transferId} · {transfer.materialNo} · {transfer.sourceDepotId} → {transfer.destinationDepotId}</p>
+            <p className="flex flex-wrap items-center gap-1 text-xs text-gray-500">
+              <span className="font-mono">{transfer.transferId}</span> · <span className="font-semibold text-[#1B2338]">{L.material}</span> ·{" "}
+              <span>{L.source}</span> <ToSeparator /> <span>{L.destination}</span>
+            </p>
           </div>
           <button onClick={onClose} disabled={submission.pending} className="text-gray-400 hover:text-gray-600 disabled:opacity-40" aria-label="Close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
@@ -130,7 +138,7 @@ export default function TransferActionDialog({ action, transfer, onClose, onDone
         <div className="flex flex-col gap-4 px-6 py-5">
           <p className={`rounded-lg px-3 py-2.5 text-sm ${cfg.irreversible ? "border border-low/40 bg-low/10 text-[#92400E]" : "bg-gray-50 text-gray-600"}`}>
             {cfg.irreversible && <b>Irreversible. </b>}
-            {cfg.explain(transfer)}
+            {cfg.explain(transfer, L)}
           </p>
 
           {action === "approve" && (

@@ -3,11 +3,12 @@ import ConfirmDialog from "../components/ConfirmDialog";
 import DistributionOverview from "../components/distribution/DistributionOverview";
 import DistributionRecommendations from "../components/distribution/DistributionRecommendations";
 import DistributionTransfers from "../components/distribution/DistributionTransfers";
-import DistributionShortages, { shortageRows } from "../components/distribution/DistributionShortages";
+import DistributionNetworkAnalysis from "../components/distribution/DistributionNetworkAnalysis";
 import RecommendationDrawer from "../components/distribution/RecommendationDrawer";
 import TransferDrawer from "../components/distribution/TransferDrawer";
 import { ErrorBanner, TabButton, describeError, num } from "../components/distribution/shared";
 import { fetchDepots } from "../services/depotService";
+import { fetchMaterials } from "../services/materialService";
 import {
   countRecommendations, countTransfers, fetchPlantMappings, fetchRecommendations, fetchTransferByTransferId, generateRecommendations,
 } from "../services/distributionService";
@@ -16,20 +17,23 @@ import {
  * Distribution Master — operational control centre for moving surplus stock
  * between depots. Admin-only (route guard + backend requireRole).
  *
- *   Overview          what is happening right now (counts, queues, latest run, network position)
- *   Recommendations   engine suggestions → review (approve / reject)
- *   Transfers         the transfer lifecycle (approve → dispatch → in transit → receive / cancel)
- *   Network Shortages what redistribution can solve vs what needs Planning
+ *   Header            Refresh (re-reads lists + recalculates the network analysis) ·
+ *                     Generate Recommendations (creates actionable recommendation records)
+ *   Overview          permanent KPI summary — always visible, never a tab
+ *   Workspace tabs:
+ *     Network Analysis   where inventory is needed and how much the depot network can solve
+ *     Recommendations    engine suggestions → review (approve / reject)
+ *     Transfers          the transfer lifecycle (approve → dispatch → in transit → receive / cancel)
  *
  * The page only reads and calls existing endpoints — inventory is changed
  * exclusively by the server at dispatch and receipt.
  */
 export default function DistributionMaster() {
-  const [tab, setTab] = useState("overview");
-  const [transferQueue, setTransferQueue] = useState("active");
+  const [tab, setTab] = useState("analysis");
   const [reloadToken, setReloadToken] = useState(0);
 
   const [depotNames, setDepotNames] = useState({});
+  const [materialNames, setMaterialNames] = useState({});
   const [plantsByDepot, setPlantsByDepot] = useState({});
   const [refError, setRefError] = useState(null);
 
@@ -53,8 +57,9 @@ export default function DistributionMaster() {
   const loadReference = useCallback(async () => {
     setRefError(null);
     try {
-      const [depots, mappings] = await Promise.all([fetchDepots({ limit: 500 }), fetchPlantMappings()]);
+      const [depots, mappings, materials] = await Promise.all([fetchDepots({ limit: 500 }), fetchPlantMappings(), fetchAllMaterials()]);
       setDepotNames(Object.fromEntries(depots.data.map((d) => [d.depotId, d.depotName])));
+      setMaterialNames(Object.fromEntries(materials.map((m) => [m.materialNo, m.description])));
       const plants = {};
       mappings.filter((m) => m.isActive).forEach((m) => { (plants[m.depotId] = plants[m.depotId] || []).push(m.plantName); });
       setPlantsByDepot(plants);
@@ -138,11 +143,6 @@ export default function DistributionMaster() {
     runAnalysis();
   }
 
-  function navigate(target, queue) {
-    if (target === "transfers" && queue) setTransferQueue(queue);
-    setTab(target);
-  }
-
   async function openTransfer(id, transferId) {
     setLookupError(null);
     if (id) {
@@ -175,8 +175,6 @@ export default function DistributionMaster() {
     }
   }
 
-  const shortageCount = analysis ? shortageRows(analysis).filter((r) => r.uncovered > 0).length : null;
-
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -197,31 +195,48 @@ export default function DistributionMaster() {
       <ErrorBanner error={lookupError} onDismiss={() => setLookupError(null)} />
       {generateResult && <GenerationSummary result={generateResult} onDismiss={() => setGenerateResult(null)} />}
 
-      <div className="flex w-fit flex-wrap gap-1 rounded-lg bg-gray-100 p-1">
-        <TabButton active={tab === "overview"} onClick={() => setTab("overview")}>Overview</TabButton>
-        <TabButton active={tab === "recommendations"} onClick={() => setTab("recommendations")} count={stats?.pendingRecommendations}>Recommendations</TabButton>
-        <TabButton active={tab === "transfers"} onClick={() => setTab("transfers")} count={stats?.activeTransfers}>Transfers</TabButton>
-        <TabButton active={tab === "shortages"} onClick={() => setTab("shortages")} count={shortageCount}>Network Shortages</TabButton>
-      </div>
+      {/* Permanent Overview — stays visible whichever workspace tab is open. */}
+      <DistributionOverview stats={stats} statsError={statsError} onRetry={loadStats} analysis={analysis} analysisLoading={analysisLoading} />
 
-      {tab === "overview" && (
-        <DistributionOverview stats={stats} statsError={statsError} onRetry={loadStats} analysis={analysis} analysisLoading={analysisLoading} onNavigate={navigate} />
-      )}
-      {tab === "recommendations" && (
-        <DistributionRecommendations depotNames={depotNames} latestRunId={stats?.latestRun?.generationRunId} reloadToken={reloadToken} onOpen={setRecId} />
-      )}
-      {tab === "transfers" && (
-        <DistributionTransfers key={transferQueue} depotNames={depotNames} reloadToken={reloadToken} initialQueue={transferQueue} onOpen={(id) => setTransferDrawerId(id)} />
-      )}
-      {tab === "shortages" && (
-        <DistributionShortages analysis={analysis} loading={analysisLoading} error={analysisError} onRun={runAnalysis} depotNames={depotNames} stale={analysisStale} />
-      )}
+      <section aria-label="Distribution workspace" className="flex flex-col gap-4 border-t border-gray-200 pt-5">
+        <div className="flex w-fit flex-wrap gap-1 rounded-lg bg-gray-100 p-1" role="tablist">
+          <TabButton active={tab === "analysis"} onClick={() => setTab("analysis")}>Network Analysis</TabButton>
+          <TabButton active={tab === "recommendations"} onClick={() => setTab("recommendations")}>Recommendations</TabButton>
+          <TabButton active={tab === "transfers"} onClick={() => setTab("transfers")}>Transfers</TabButton>
+        </div>
+
+        {tab === "analysis" && (
+          <DistributionNetworkAnalysis
+            analysis={analysis}
+            loading={analysisLoading}
+            error={analysisError}
+            onRun={runAnalysis}
+            depotNames={depotNames}
+            materialNames={materialNames}
+            stale={analysisStale}
+          />
+        )}
+        {tab === "recommendations" && (
+          <DistributionRecommendations
+            depotNames={depotNames}
+            materialNames={materialNames}
+            latestRunId={stats?.latestRun?.generationRunId}
+            latestRunAt={stats?.latestRun?.generatedAt}
+            reloadToken={reloadToken}
+            onOpen={setRecId}
+          />
+        )}
+        {tab === "transfers" && (
+          <DistributionTransfers depotNames={depotNames} materialNames={materialNames} reloadToken={reloadToken} onOpen={(id) => setTransferDrawerId(id)} />
+        )}
+      </section>
 
       <RecommendationDrawer
         open={Boolean(recId)}
         recommendationId={recId}
         onClose={() => setRecId(null)}
         depotNames={depotNames}
+        materialNames={materialNames}
         plantsByDepot={plantsByDepot}
         onChanged={handleChanged}
         onOpenTransfer={(id, transferId) => { setRecId(null); openTransfer(id, transferId); }}
@@ -231,6 +246,7 @@ export default function DistributionMaster() {
         transferId={transferDrawerId}
         onClose={() => setTransferDrawerId(null)}
         depotNames={depotNames}
+        materialNames={materialNames}
         plantsByDepot={plantsByDepot}
         onChanged={handleChanged}
       />
@@ -247,6 +263,15 @@ export default function DistributionMaster() {
       />
     </div>
   );
+}
+
+/** All Material Master records for name lookups (the list endpoint returns at most 200 per page). */
+async function fetchAllMaterials() {
+  const first = await fetchMaterials({ page: 1, limit: 200 });
+  const rest = await Promise.all(
+    Array.from({ length: Math.max(0, first.pagination.totalPages - 1) }, (_, i) => fetchMaterials({ page: i + 2, limit: 200 }))
+  );
+  return [first, ...rest].flatMap((r) => r.data);
 }
 
 function GenerationSummary({ result, onDismiss }) {

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchTransfer, fetchTransferMovements } from "../../services/distributionService";
 import TransferActionDialog from "./TransferActionDialog";
-import { Drawer, ErrorBanner, KV, SectionTitle, StatusBadge, dateTime, describeError, num, statusLabel } from "./shared";
+import {
+  DepotIdentity, Drawer, ErrorBanner, KV, MaterialIdentity, RouteSections, SectionTitle, StatusBadge, dateTime, describeError, nameOr, num, statusLabel,
+} from "./shared";
 
 const STAGES = ["REQUESTED", "APPROVED", "DISPATCHED", "IN_TRANSIT", "RECEIVED"];
 
@@ -20,7 +22,7 @@ const ACTIONS_BY_STATUS = {
  * the backend's statusHistory — never reconstructed), the StockMovement ledger
  * and the valid next actions.
  */
-export default function TransferDrawer({ open, transferId, onClose, depotNames, plantsByDepot, onChanged }) {
+export default function TransferDrawer({ open, transferId, onClose, depotNames, materialNames, plantsByDepot, onChanged }) {
   const [transfer, setTransfer] = useState(null);
   const [movements, setMovements] = useState([]);
   const [error, setError] = useState(null);
@@ -57,7 +59,7 @@ export default function TransferDrawer({ open, transferId, onClose, depotNames, 
     load(); // pick up the full ledger + history exactly as stored
   }
 
-  const depotLabel = (id) => (depotNames?.[id] ? `${id} · ${depotNames[id]}` : id);
+  const depotLabel = (id) => <DepotIdentity depotId={id} depotName={depotNames?.[id]} align="right" />;
   const plantOf = (stored, depotId) => stored || (plantsByDepot?.[depotId]?.length ? `${plantsByDepot[depotId].join(", ")} (current mapping)` : "—");
 
   const actions = transfer ? ACTIONS_BY_STATUS[transfer.status] || [] : [];
@@ -84,7 +86,7 @@ export default function TransferDrawer({ open, transferId, onClose, depotNames, 
         open={open}
         onClose={onClose}
         title={transfer ? transfer.transferId : "Transfer"}
-        subtitle={transfer ? `${transfer.materialNo} · ${transfer.sourceDepotId} → ${transfer.destinationDepotId}` : "Loading…"}
+        subtitle={transfer ? `${nameOr(materialNames, transfer.materialNo)} · ${nameOr(depotNames, transfer.sourceDepotId)} to ${nameOr(depotNames, transfer.destinationDepotId)}` : "Loading…"}
         badge={transfer && <StatusBadge status={transfer.status} />}
         footer={footer}
       >
@@ -94,19 +96,17 @@ export default function TransferDrawer({ open, transferId, onClose, depotNames, 
 
         {transfer && (
           <div className="flex flex-col">
-            <div className="grid gap-4 md:grid-cols-2">
-              <div>
-                <SectionTitle>Source</SectionTitle>
-                <KV rows={[["Depot", depotLabel(transfer.sourceDepotId)], ["Plant", plantOf(transfer.sourcePlantName, transfer.sourceDepotId)]]} />
-              </div>
-              <div>
-                <SectionTitle>Destination</SectionTitle>
-                <KV rows={[["Depot", depotLabel(transfer.destinationDepotId)], ["Plant", plantOf(transfer.destinationPlantName, transfer.destinationDepotId)]]} />
-              </div>
+            <div className="mb-1">
+              <MaterialIdentity materialNo={transfer.materialNo} materialName={materialNames?.[transfer.materialNo]} size="lg" />
             </div>
 
-            <SectionTitle>Quantities · {transfer.materialNo}</SectionTitle>
-            <div className="grid grid-cols-5 gap-2 text-center">
+            <RouteSections
+              source={<KV rows={[["Depot", depotLabel(transfer.sourceDepotId)], ["Plant", plantOf(transfer.sourcePlantName, transfer.sourceDepotId)]]} />}
+              destination={<KV rows={[["Depot", depotLabel(transfer.destinationDepotId)], ["Plant", plantOf(transfer.destinationPlantName, transfer.destinationDepotId)]]} />}
+            />
+
+            <SectionTitle>Quantities</SectionTitle>
+            <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-5">
               {[
                 ["Requested", transfer.requestedQuantity],
                 ["Approved", transfer.approvedQuantity],
@@ -173,7 +173,19 @@ export default function TransferDrawer({ open, transferId, onClose, depotNames, 
         )}
       </Drawer>
 
-      {action && transfer && <TransferActionDialog action={action} transfer={transfer} onClose={() => setAction(null)} onDone={handleDone} />}
+      {action && transfer && (
+        <TransferActionDialog
+          action={action}
+          transfer={transfer}
+          labels={{
+            material: nameOr(materialNames, transfer.materialNo),
+            source: nameOr(depotNames, transfer.sourceDepotId),
+            destination: nameOr(depotNames, transfer.destinationDepotId),
+          }}
+          onClose={() => setAction(null)}
+          onDone={handleDone}
+        />
+      )}
     </>
   );
 }
